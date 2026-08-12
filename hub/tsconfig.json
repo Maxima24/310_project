@@ -1,0 +1,18 @@
+{
+  "extends": "@cpe310/tsconfig/base.json",
+  "compilerOptions": {
+    "rootDir": "src",
+    "outDir": "dist",
+    "baseUrl": ".",
+    "emitDecoratorMetadata": true,
+    "experimentalDecorators": true,
+    "declaration": false,
+    "declarationMap": false,
+    "types": ["node", "jest"],
+    // Nest's DI reads constructor param types via emitDecoratorMetadata, which
+    // needs the property-initialisation check relaxed for injected `!`-less fields.
+    "strictPropertyInitialization": false
+  },
+  "include": ["src/**/*.ts"],
+  "exclude": ["node_modules", "dist", "prisma"]
+}

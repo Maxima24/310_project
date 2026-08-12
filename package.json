@@ -1,0 +1,26 @@
+{
+  "name": "cpe310-security",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Multi-agent physical security system: Python collector agents reporting to a NestJS hub",
+  "packageManager": "pnpm@9.15.9",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "turbo run build",
+    "dev": "turbo run dev",
+    "test": "turbo run test",
+    "lint": "turbo run lint",
+    "db:generate": "pnpm --filter hub exec prisma generate",
+    "db:migrate": "pnpm --filter hub exec prisma migrate dev",
+    "db:deploy": "pnpm --filter hub exec prisma migrate deploy",
+    "db:seed": "pnpm --filter hub run db:seed",
+    "db:studio": "pnpm --filter hub exec prisma studio",
+    "ws:watch": "node tools/ws-client.mjs"
+  },
+  "devDependencies": {
+    "socket.io-client": "^4.8.3",
+    "turbo": "^2.3.3"
+  }
+}

@@ -1,0 +1,7 @@
+# Runtime dependencies for simulation mode — works on any machine, no hardware.
+requests>=2.32,<3
+
+# Test-only. Kept here rather than in a separate file so `pip install -r
+# requirements.txt && pytest` just works for a marker.
+pytest>=8.3,<9
+responses>=0.25,<1

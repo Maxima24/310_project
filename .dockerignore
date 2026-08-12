@@ -1,0 +1,24 @@
+# Root context is used by hub/Dockerfile — keep it small.
+**/node_modules
+**/dist
+**/.turbo
+**/coverage
+**/*.tsbuildinfo
+
+# Never bake secrets into an image.
+**/.env
+**/.env.local
+
+**/__pycache__
+**/*.py[cod]
+**/.pytest_cache
+**/.venv
+**/venv
+
+.git
+.gitignore
+.vscode
+.idea
+**/*.log
+README.md
+docker-compose.yml

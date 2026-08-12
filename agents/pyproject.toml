@@ -1,0 +1,17 @@
+[project]
+name = "cpe310-security-agents"
+version = "1.0.0"
+description = "Python collector agents for the CPE 310 physical security hub"
+requires-python = ">=3.11"
+dependencies = ["requests>=2.32,<3"]
+
+[project.optional-dependencies]
+# Mirrors requirements-hardware.txt — see that file for the OpenCV wheel caveat.
+hardware = ["opencv-python-headless>=4.10", "gpiozero>=2.0"]
+dev = ["pytest>=8.3,<9", "responses>=0.25,<1"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# Lets the tests import `security_agent` without an editable install.
+pythonpath = ["."]
+addopts = "-q"

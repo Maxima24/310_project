@@ -1,0 +1,129 @@
+// Schema lives in `hub/` rather than a `packages/db` workspace because the hub
+// is the only DB consumer. A separate package would add a build step and
+// generated-client resolution problems inside the Docker image for no gain.
+//
+// Enum string values MUST match packages/contracts/src/*.ts exactly — those are
+// the wire format, and Postgres will reject anything else.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum AgentType {
+  motion
+  door
+  camera
+}
+
+enum AgentStatus {
+  online
+  offline
+}
+
+enum SystemMode {
+  disarmed
+  home
+  away
+}
+
+enum EventType {
+  motion_detected
+  door_opened
+  door_closed
+  camera_motion
+}
+
+enum AlertType {
+  intrusion_motion
+  intrusion_door
+  camera_motion
+  agent_offline
+  agent_recovered
+}
+
+enum AlertSeverity {
+  info
+  warning
+  critical
+}
+
+/// A collector agent. `id` is the operator-chosen string the agent sends
+/// (e.g. "motion-hallway") rather than a surrogate key, so an agent restart
+/// upserts onto the same row instead of orphaning its history.
+model Agent {
+  id           String      @id
+  type         AgentType
+  location     String
+  status       AgentStatus @default(online)
+  version      String?
+  capabilities String[]    @default([])
+  registeredAt DateTime    @default(now())
+  /// Written on every heartbeat AND every event — an event is proof of life too.
+  /// This is the liveness source of truth; Redis is roadmap, not needed at this scale.
+  lastSeenAt   DateTime    @default(now())
+
+  events Event[]
+  alerts Alert[]
+
+  /// Exactly matches the liveness sweep predicate: status = 'online' AND lastSeenAt < cutoff.
+  @@index([status, lastSeenAt])
+}
+
+/// A raw sensor observation. Facts only — no policy judgement.
+model Event {
+  id       String    @id @default(uuid())
+  agentId  String
+  agent    Agent     @relation(fields: [agentId], references: [id], onDelete: Cascade)
+  type     EventType
+  /// Free-form detail: contour area today, a clip URL later (roadmap item 5).
+  metadata Json      @default("{}")
+  /// Agent-side clock. Informational — do not order by this.
+  occurredAt DateTime
+  /// Hub-side clock. Authoritative for ordering, immune to agent clock skew.
+  createdAt  DateTime @default(now())
+
+  alerts Alert[]
+
+  @@index([createdAt(sort: Desc)])
+  @@index([agentId, createdAt(sort: Desc)])
+  @@index([type, createdAt(sort: Desc)])
+}
+
+/// A hub judgement produced by the alert rules.
+model Alert {
+  id       String        @id @default(uuid())
+  type     AlertType
+  severity AlertSeverity
+  message  String
+  /// Nullable because a future system-level alert may not belong to one agent.
+  agentId  String?
+  agent    Agent?        @relation(fields: [agentId], references: [id], onDelete: SetNull)
+  /// Null for agent_offline / agent_recovered — those come from the sweep, not an event.
+  eventId  String?
+  event    Event?        @relation(fields: [eventId], references: [id], onDelete: SetNull)
+  /// The arm mode that produced this alert — the reason it exists at all.
+  modeAtTrigger  SystemMode
+  acknowledged   Boolean   @default(false)
+  acknowledgedAt DateTime?
+  createdAt      DateTime  @default(now())
+
+  @@index([createdAt(sort: Desc)])
+  @@index([acknowledged, createdAt(sort: Desc)])
+  /// Serves the dedup lookup: same (type, agent), still unacknowledged, within the cooldown.
+  @@index([type, agentId, acknowledged, createdAt(sort: Desc)])
+}
+
+/// Singleton row (id is always 1). A typed enum column beats a generic
+/// key/value settings table here: Postgres rejects an invalid mode outright and
+/// there is no string parsing at the call site. Mode is the only setting the
+/// system defines.
+model SystemState {
+  id        Int        @id @default(1)
+  mode      SystemMode @default(disarmed)
+  updatedAt DateTime   @updatedAt
+}

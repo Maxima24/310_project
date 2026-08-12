@@ -1,0 +1,95 @@
+# Brings up the whole system: Postgres, the hub, and three simulated agents.
+#
+#   docker compose up --build
+#
+# Then arm it and watch alerts fire — see the README "Verify it end to end".
+# Values come from the root .env (copy .env.example).
+
+name: cpe310-security
+
+x-agent-common: &agent-common
+  build:
+    context: ./agents
+    dockerfile: Dockerfile
+  image: cpe310-agent:latest
+  restart: unless-stopped
+  environment:
+    AGENT_API_KEY: ${AGENT_API_KEY:-dev-key-change-me}
+    HUB_URL: http://hub:3000
+  depends_on:
+    hub:
+      condition: service_healthy
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      POSTGRES_DB: ${POSTGRES_DB:-security}
+    # Published so the hub can also be run natively against this database.
+    # Defaults to 5433, not 5432: a locally-installed Postgres commonly owns 5432,
+    # and binding over it silently sends migrations to the wrong server.
+    # Containers reach it as `postgres:5432` regardless of this mapping.
+    ports:
+      - '${POSTGRES_PORT:-5433}:5432'
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    # The hub waits on this rather than on "container started" — Postgres accepts
+    # TCP connections seconds before it can actually serve queries, and the hub's
+    # migration step would fail against a half-started database.
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-security}']
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  hub:
+    build:
+      # Root context: the hub depends on packages/contracts via `workspace:*`.
+      context: .
+      dockerfile: ./hub/Dockerfile
+    image: cpe310-hub:latest
+    restart: unless-stopped
+    ports:
+      - '${HUB_PORT:-3000}:3000'
+    environment:
+      # This stack is a local demo harness, so it defaults to `development` and
+      # the sample key works out of the box. The hub REFUSES to start when
+      # NODE_ENV=production while AGENT_API_KEY is still `dev-key-change-me` — so
+      # a real deployment must set both together:
+      #   NODE_ENV=production AGENT_API_KEY=<a real secret> docker compose up
+      NODE_ENV: ${NODE_ENV:-development}
+      PORT: 3000
+      AGENT_API_KEY: ${AGENT_API_KEY:-dev-key-change-me}
+      DATABASE_URL: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${POSTGRES_DB:-security}?schema=public
+      HEARTBEAT_INTERVAL_MS: ${HEARTBEAT_INTERVAL_MS:-10000}
+      HEARTBEAT_TIMEOUT_MS: ${HEARTBEAT_TIMEOUT_MS:-30000}
+      ALERT_COOLDOWN_MS: ${ALERT_COOLDOWN_MS:-60000}
+      CORS_ORIGIN: '*'
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  # --- Simulated collector agents ------------------------------------------
+  # All three share one image; only the arguments differ.
+
+  agent-motion:
+    <<: *agent-common
+    command: ['--type', 'motion', '--id', 'motion-hallway', '--location', 'Hallway']
+
+  agent-door:
+    <<: *agent-common
+    command: ['--type', 'door', '--id', 'door-front', '--location', 'Front door']
+
+  # Simulation only. `--real --source 0` cannot work here: Docker Desktop on
+  # Windows and macOS has no USB/webcam passthrough. To test a real camera, run
+  # the agent natively against this containerized hub — see the README.
+  agent-camera:
+    <<: *agent-common
+    command: ['--type', 'camera', '--id', 'camera-lobby', '--location', 'Lobby']
+
+volumes:
+  postgres-data:

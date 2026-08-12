@@ -1,0 +1,27 @@
+# Real-hardware extras. Install on top of requirements.txt, and ONLY on the
+# machine that has the hardware:
+#
+#   pip install -r requirements.txt -r requirements-hardware.txt
+#
+# --- Camera (--type camera --real) -----------------------------------------
+#
+# WHEEL WARNING: opencv-python-headless usually lags the newest CPython by
+# several months, and this repo's dev machine runs Python 3.14 — pip may fall
+# back to a source build needing CMake and a C++ toolchain.
+#
+# Options, cheapest first:
+#   1. Run the camera agent in Docker — agents/Dockerfile pins python:3.12-slim.
+#   2. Make a 3.12/3.13 virtualenv just for the camera agent.
+#   3. Build from source (slow, needs CMake).
+#
+# None of this affects simulation mode: cv2 is imported lazily, so an agent that
+# never uses --real never touches OpenCV.
+opencv-python-headless>=4.10
+
+# --- Raspberry Pi GPIO (--type motion|door --real) -------------------------
+#
+# Then replace the marked stubs in security_agent/sensors.py — search for
+# "HARDWARE STUB". Two commented lines per class.
+gpiozero>=2.0
+# Pin-factory backend. lgpio works on Pi 5 and Pi 4; use RPi.GPIO on older boards.
+lgpio>=0.2.2.0; platform_machine == "aarch64" or platform_machine == "armv7l"

@@ -1,0 +1,9 @@
+{
+  "name": "@cpe310/tsconfig",
+  "version": "1.0.0",
+  "private": true,
+  "license": "MIT",
+  "files": [
+    "base.json"
+  ]
+}
