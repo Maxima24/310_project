@@ -19,7 +19,7 @@ import os
 import sys
 
 from security_agent.agents import CameraAgent, DoorAgent, MotionAgent
-from security_agent.base import BaseAgent
+from security_agent.base import AgentConfigurationError, BaseAgent
 from security_agent.contracts import AgentType
 from security_agent.sensors import (
     GpioDoorSensor,
@@ -33,6 +33,34 @@ DEFAULT_HUB = "http://localhost:3000"
 
 EXIT_MISSING_KEY = 2
 EXIT_BAD_HARDWARE = 3
+EXIT_BAD_ARGS = 4
+
+
+def positive_float(raw: str) -> float:
+    """argparse type for intervals.
+
+    Zero or negative would turn the poll loop into a busy-wait pinning a core, and
+    a negative heartbeat interval would beat continuously — both look like the agent
+    "just hangs", so reject them at parse time with a readable message.
+    """
+    try:
+        value = float(raw)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"{raw!r} is not a number") from None
+    if value <= 0:
+        raise argparse.ArgumentTypeError(f"must be greater than 0 (got {value})")
+    return value
+
+
+def non_negative_float(raw: str) -> float:
+    """argparse type for cooldowns, where 0 legitimately means 'no cooldown'."""
+    try:
+        value = float(raw)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"{raw!r} is not a number") from None
+    if value < 0:
+        raise argparse.ArgumentTypeError(f"cannot be negative (got {value})")
+    return value
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -63,10 +91,12 @@ def build_parser() -> argparse.ArgumentParser:
         default=os.environ.get("HUB_URL", DEFAULT_HUB),
         help=f"Hub base URL (env HUB_URL, default {DEFAULT_HUB}).",
     )
-    parser.add_argument("--interval", type=float, default=1.0, help="Seconds between sensor polls.")
+    parser.add_argument(
+        "--interval", type=positive_float, default=1.0, help="Seconds between sensor polls."
+    )
     parser.add_argument(
         "--heartbeat-interval",
-        type=float,
+        type=positive_float,
         default=10.0,
         help="Seconds between heartbeats. Must stay below the hub's HEARTBEAT_TIMEOUT_MS.",
     )
@@ -92,7 +122,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     parser.add_argument(
         "--cooldown",
-        type=float,
+        type=non_negative_float,
         default=None,
         help="Seconds to wait before reporting the same kind of activity again "
         "(default: 5 for motion, 10 for camera). Distinct from the hub's alert dedup.",
@@ -168,6 +198,16 @@ def main(argv: list[str] | None = None) -> int:
 
     transport = HttpTransport(args.hub, api_key)
 
+    if args.heartbeat_interval >= 30.0:
+        # The hub's default HEARTBEAT_TIMEOUT_MS is 30s, so beating this slowly gets
+        # the agent swept offline between beats and produces phantom tamper alerts.
+        print(
+            f"Warning: --heartbeat-interval {args.heartbeat_interval}s is at or above the "
+            "hub's default 30s timeout; the hub will report this agent as offline "
+            "between beats. Raise HEARTBEAT_TIMEOUT_MS on the hub to match.",
+            file=sys.stderr,
+        )
+
     try:
         agent = build_agent(args, transport)
     except NotImplementedError as exc:
@@ -178,10 +218,14 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         agent.run()
-    except RuntimeError as exc:
-        # Raised by the camera when OpenCV is missing or the source will not open.
+    except AgentConfigurationError as exc:
+        # Missing OpenCV, an unopenable source, or a stream that died for good.
         print(f"{exc}", file=sys.stderr)
         return EXIT_BAD_HARDWARE
+    except KeyboardInterrupt:
+        # Ctrl-C during registration backoff lands here, before the signal handler
+        # is doing the work. A traceback would make a clean stop look like a crash.
+        return 0
 
     return 0
 

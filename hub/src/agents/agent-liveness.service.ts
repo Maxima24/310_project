@@ -44,11 +44,19 @@ export class AgentLivenessService implements OnModuleInit {
     private readonly scheduler: SchedulerRegistry,
   ) {}
 
+  /** Wall-clock time the hub started, used for the startup grace period below. */
+  private bootedAt = Date.now();
+
+  /** Guards against a slow sweep overlapping the next scheduled tick. */
+  private sweeping = false;
+
   /**
    * Registered imperatively rather than with @Cron because the schedule is
    * configurable — a decorator argument cannot read ConfigService.
    */
   onModuleInit(): void {
+    this.bootedAt = Date.now();
+
     const cron = this.config.get<string>('liveness.sweepCron') ?? '*/5 * * * * *';
     const job = new CronJob(cron, () => {
       void this.sweep();
@@ -58,12 +66,30 @@ export class AgentLivenessService implements OnModuleInit {
     job.start();
 
     this.logger.log(
-      `Liveness sweep scheduled (${cron}); offline after ${this.timeoutMs}ms of silence`,
+      `Liveness sweep scheduled (${cron}); offline after ${this.timeoutMs}ms of silence ` +
+        `(first ${this.timeoutMs}ms of uptime are a grace period)`,
     );
   }
 
   private get timeoutMs(): number {
     return this.config.get<number>('liveness.timeoutMs') ?? 30_000;
+  }
+
+  /**
+   * True while the hub has been up for less than one heartbeat timeout.
+   *
+   * Every agent's `lastSeenAt` is stale immediately after a hub restart, because
+   * the hub was not running to receive heartbeats. Sweeping in that window
+   * declares the entire healthy fleet tampered-with, raises an alert per agent,
+   * and then clears them all again seconds later as the heartbeats land — the exact
+   * storm observed on the first Docker run.
+   *
+   * Waiting one full timeout costs nothing in detection latency: a live agent beats
+   * every HEARTBEAT_INTERVAL_MS, which env validation guarantees is shorter than the
+   * timeout, so anything genuinely absent is still caught on the first real sweep.
+   */
+  private inStartupGrace(now: number): boolean {
+    return now - this.bootedAt < this.timeoutMs;
   }
 
   /**
@@ -76,46 +102,73 @@ export class AgentLivenessService implements OnModuleInit {
    * overlaps the next one.
    */
   async sweep(): Promise<void> {
-    const timeoutMs = this.timeoutMs;
-    const cutoff = new Date(Date.now() - timeoutMs);
+    const now = Date.now();
 
-    let stale: StaleAgent[];
-
-    try {
-      stale = await this.prisma.$transaction(async (tx) => {
-        const rows = await tx.agent.findMany({
-          where: { status: AgentStatus.Online, lastSeenAt: { lt: cutoff } },
-          select: { id: true, type: true, location: true, lastSeenAt: true },
-        });
-
-        if (rows.length > 0) {
-          await tx.agent.updateMany({
-            where: { id: { in: rows.map((r) => r.id) } },
-            data: { status: AgentStatus.Offline },
-          });
-        }
-
-        return rows;
-      });
-    } catch (error) {
-      // A sweep failure must not kill the scheduled job — the next tick retries.
-      this.logger.error(`Liveness sweep failed: ${(error as Error).message}`);
+    if (this.inStartupGrace(now)) {
+      this.logger.debug('Skipping sweep — within startup grace period');
       return;
     }
 
-    for (const agent of stale) {
-      const silentForMs = Date.now() - agent.lastSeenAt.getTime();
-      this.logger.warn(
-        `Agent ${agent.id} went offline (silent ${Math.round(silentForMs / 1000)}s)`,
-      );
+    // A sweep slowed by a busy database must not overlap the next tick and alert
+    // twice on the same agent.
+    if (this.sweeping) {
+      this.logger.warn('Previous liveness sweep still running — skipping this tick');
+      return;
+    }
+    this.sweeping = true;
 
-      await this.alerts.raiseAgentOffline(
-        { id: agent.id, type: agent.type, location: agent.location },
-        silentForMs,
-      );
+    const timeoutMs = this.timeoutMs;
+    const cutoff = new Date(now - timeoutMs);
 
-      const full = await this.prisma.agent.findUnique({ where: { id: agent.id } });
-      if (full) this.realtime.emitAgent(toAgentView(full));
+    try {
+      let stale: StaleAgent[];
+
+      try {
+        stale = await this.prisma.$transaction(async (tx) => {
+          const rows = await tx.agent.findMany({
+            where: { status: AgentStatus.Online, lastSeenAt: { lt: cutoff } },
+            select: { id: true, type: true, location: true, lastSeenAt: true },
+          });
+
+          if (rows.length > 0) {
+            await tx.agent.updateMany({
+              where: { id: { in: rows.map((r) => r.id) } },
+              data: { status: AgentStatus.Offline },
+            });
+          }
+
+          return rows;
+        });
+      } catch (error) {
+        // A sweep failure must not kill the scheduled job — the next tick retries.
+        this.logger.error(`Liveness sweep failed: ${(error as Error).message}`);
+        return;
+      }
+
+      for (const agent of stale) {
+        const silentForMs = Date.now() - agent.lastSeenAt.getTime();
+        this.logger.warn(
+          `Agent ${agent.id} went offline (silent ${Math.round(silentForMs / 1000)}s)`,
+        );
+
+        try {
+          await this.alerts.raiseAgentOffline(
+            { id: agent.id, type: agent.type, location: agent.location },
+            silentForMs,
+          );
+
+          const full = await this.prisma.agent.findUnique({ where: { id: agent.id } });
+          if (full) this.realtime.emitAgent(toAgentView(full));
+        } catch (error) {
+          // One agent failing to alert must not abandon the rest of the batch —
+          // the others are already marked offline and would never be reported.
+          this.logger.error(
+            `Failed to raise agent_offline for ${agent.id}: ${(error as Error).message}`,
+          );
+        }
+      }
+    } finally {
+      this.sweeping = false;
     }
   }
 }

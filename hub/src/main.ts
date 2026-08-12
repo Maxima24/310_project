@@ -3,12 +3,22 @@ import 'reflect-metadata';
 import { Logger, ValidationPipe } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { NestFactory } from '@nestjs/core';
+import type { NestExpressApplication } from '@nestjs/platform-express';
 
 import { AppModule } from './app.module';
 
 async function bootstrap(): Promise<void> {
   const logger = new Logger('Bootstrap');
-  const app = await NestFactory.create(AppModule);
+  const app = await NestFactory.create<NestExpressApplication>(AppModule, {
+    // Events carry a free-form `metadata` object, so cap the body explicitly rather
+    // than relying on the framework default. 64kB is generous for sensor readings
+    // and keeps a misbehaving (or hostile) agent from writing multi-megabyte rows
+    // into Postgres on every poll. Video evidence is a URL reference by design
+    // (roadmap item 5), not an inline payload, so this ceiling stays valid.
+    bodyParser: true,
+    rawBody: false,
+  });
+  app.useBodyParser('json', { limit: '64kb' });
 
   const config = app.get(ConfigService);
   const port = config.get<number>('port') ?? 3000;

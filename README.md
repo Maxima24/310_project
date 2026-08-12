@@ -152,9 +152,14 @@ Or `pnpm db:studio` for a browser UI.
 ## Tests
 
 ```bash
-pnpm test                   # hub: alert rules, dedup/cooldown, liveness sweep
-cd agents && pytest         # agents: event shapes, edge detection, transport retry
+pnpm test                   # 76 hub tests
+cd agents && pytest         # 44 agent tests
 ```
+
+Hub coverage: the full mode × event rule matrix, dedup/cooldown, the liveness sweep (including the
+startup grace period and re-entrancy), registry recovery paths, event ingest ordering and pagination
+clamping, and boot-time env validation. Agent coverage: wire-format shapes, door edge detection, camera
+cooldown and reconnect give-up, transport buffering/retry/re-registration, and CLI guards.
 
 The hub tests mock Prisma, so no database is needed. The agent tests assert against literal wire
 strings — they are the drift detector between `packages/contracts` and `security_agent/contracts.py`.
@@ -195,7 +200,41 @@ Agents heartbeat every `HEARTBEAT_INTERVAL_MS` (10s). An agent is declared offli
 `HEARTBEAT_TIMEOUT_MS=25000` for a hard 30s ceiling. The hub refuses to start if the timeout is not
 greater than the interval, which would sweep healthy agents offline between beats.
 
-An event counts as proof of life too, so a sensor busy reporting motion is never swept offline.
+An event counts as proof of life too, so a sensor busy reporting motion is never swept offline — and
+because activity funnels through one code path, an event from an agent marked offline clears its
+`agent_offline` alert exactly as a heartbeat would.
+
+**Startup grace period.** The sweep does nothing for the first `HEARTBEAT_TIMEOUT_MS` of hub uptime.
+Every agent's `lastSeenAt` is stale right after a hub restart, because the hub wasn't running to
+receive heartbeats — sweeping then would declare the whole healthy fleet tampered-with and clear it
+again seconds later. Waiting one timeout costs no detection latency, since a live agent beats well
+inside that window.
+
+---
+
+## Failure handling
+
+Deliberate choices about what happens when things break, since "a security system that lies about its
+own health" is the failure that matters most.
+
+| Situation | Behavior | Why |
+|---|---|---|
+| Hub restarts while agents run | No alerts | Startup grace period (above) |
+| Agent's clock is badly wrong | Event **stored**, warning logged | Never drop a real intrusion report over a bad NTP setup; ordering uses hub time |
+| Hub unreachable when an agent reports | Event buffered locally (cap 500, oldest dropped), flushed in order on reconnect | A brief outage must not lose the event that mattered |
+| Hub's database is wiped | Agent gets 404, re-registers, retries | Fleet self-heals with nobody restarting anything |
+| Agent's heartbeat hits an unexpected error | Thread logs and keeps beating | A dead heartbeat thread would raise a tamper alert for a demonstrably live agent |
+| Sensor read throws | Logged, polling continues, backs off after 5 straight failures | A flaky sensor is a maintenance issue, not a reason to stop reporting liveness |
+| OpenCV missing / camera won't open | Agent exits with a fix-it message (code 3) | Retrying forever helps nobody and hides the problem |
+| Camera stream dies mid-run | Reconnects, then exits after 3 failed attempts | A blind camera reporting healthy heartbeats is worse than one that stops — exiting lets `agent_offline` tell the truth |
+| Liveness sweep overruns its interval | Next tick skipped | Prevents double-alerting on the same agent |
+| One agent fails to alert during a sweep | Remaining agents still processed | They're already marked offline and would otherwise never be reported |
+| Sweep hits a DB error | Logged, job survives, next tick retries | A transient blip must not silently disable tamper detection |
+
+**Input limits.** Request bodies are capped at 64 kB (`metadata` is free-form, and video evidence is a
+URL reference by design, not an inline payload). `?limit=` is clamped to `EVENTS_PAGE_MAX`. The hub
+refuses to boot on an `AGENT_API_KEY` under 8 characters, a `HEARTBEAT_TIMEOUT_MS` not greater than the
+interval, or the sample key with `NODE_ENV=production`.
 
 ---
 

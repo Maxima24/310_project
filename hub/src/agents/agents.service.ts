@@ -49,8 +49,11 @@ export class AgentsService {
         // Type/location can legitimately change if a sensor is physically moved.
         type: dto.type,
         location: dto.location,
-        version: dto.version ?? null,
-        capabilities: dto.capabilities ?? [],
+        // Only overwrite when supplied. A caller that re-registers with a minimal
+        // payload should not silently wipe the version and capabilities the agent
+        // reported earlier.
+        ...(dto.version !== undefined ? { version: dto.version } : {}),
+        ...(dto.capabilities !== undefined ? { capabilities: dto.capabilities } : {}),
         status: AgentStatus.Online,
         lastSeenAt: new Date(),
       },
@@ -82,30 +85,37 @@ export class AgentsService {
       throw new NotFoundException(`Agent ${id} is not registered — POST /agents/register first`);
     }
 
-    const agent = await this.touch(id);
+    const agent = await this.recordActivity(existing);
 
-    if (existing.status === AgentStatus.Offline) {
-      await this.handleRecovery(agent);
-    }
-
-    const view = toAgentView(agent);
-    // Only broadcast on a state change; a healthy 10-agent fleet would otherwise
-    // push one frame per second to every dashboard for no new information.
-    if (existing.status === AgentStatus.Offline) this.realtime.emitAgent(view);
-
-    return { agent: view, heartbeatIntervalMs: this.heartbeatIntervalMs };
+    return { agent: toAgentView(agent), heartbeatIntervalMs: this.heartbeatIntervalMs };
   }
 
   /**
-   * Marks an agent seen and online. Called by the heartbeat route and by event
-   * ingestion — an event is proof of life just as much as a heartbeat is, and an
-   * agent busy reporting motion should never be swept offline.
+   * Marks an agent seen and online, handling the offline -> online transition.
+   *
+   * Every activity path funnels through here — heartbeats AND events — because an
+   * event is proof of life just as much as a heartbeat is. Routing recovery through
+   * one method is what stops an agent that reports an event while marked offline
+   * from being quietly flipped to online with its `agent_offline` alert left open
+   * forever (which would then let the dedup window suppress the next real one).
+   *
+   * Takes the already-loaded row rather than an id so the caller's read is reused
+   * and the previous status is known without a second query.
    */
-  async touch(id: string): Promise<Agent> {
-    return this.prisma.agent.update({
-      where: { id },
+  async recordActivity(previous: Agent): Promise<Agent> {
+    const agent = await this.prisma.agent.update({
+      where: { id: previous.id },
       data: { lastSeenAt: new Date(), status: AgentStatus.Online },
     });
+
+    if (previous.status === AgentStatus.Offline) {
+      await this.handleRecovery(agent);
+      // Broadcast only on a state change; a healthy 10-agent fleet would otherwise
+      // push a frame per second to every dashboard for no new information.
+      this.realtime.emitAgent(toAgentView(agent));
+    }
+
+    return agent;
   }
 
   async findOne(id: string): Promise<Agent | null> {
@@ -114,9 +124,15 @@ export class AgentsService {
 
   async findAll(): Promise<AgentView[]> {
     const agents = await this.prisma.agent.findMany({
-      orderBy: [{ status: 'asc' }, { id: 'asc' }],
+      // Offline first: Postgres orders an enum by declaration order, and
+      // AgentStatus declares `online` before `offline`, so `desc` surfaces the
+      // agents that need attention at the top of the list.
+      orderBy: [{ status: 'desc' }, { id: 'asc' }],
     });
-    return agents.map((a) => toAgentView(a));
+    // One `now` for the whole list so two agents seen in the same instant cannot
+    // report different secondsSinceLastSeen.
+    const now = Date.now();
+    return agents.map((a) => toAgentView(a, now));
   }
 
   /**

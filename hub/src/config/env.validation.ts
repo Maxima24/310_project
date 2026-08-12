@@ -7,6 +7,7 @@ import {
   IsString,
   Max,
   Min,
+  MinLength,
   validateSync,
 } from 'class-validator';
 
@@ -36,6 +37,10 @@ export class EnvVars {
 
   @IsString()
   @IsNotEmpty({ message: 'AGENT_API_KEY is required — copy .env.example to .env and set one.' })
+  // A one-character key is guessable in a single request. This is the only thing
+  // standing between the network and the alert system, so refuse the obviously
+  // broken case at boot rather than appearing to work.
+  @MinLength(8, { message: 'AGENT_API_KEY must be at least 8 characters.' })
   AGENT_API_KEY: string;
 
   @IsString()
@@ -69,8 +74,12 @@ export class EnvVars {
   @Min(1)
   EVENTS_PAGE_LIMIT: number = 50;
 
+  // Upper-bounded as well as lower: this is the ceiling a client's `?limit=` is
+  // clamped to, so an absurd value here would let one request try to serialise the
+  // entire events table into memory.
   @IsInt()
   @Min(1)
+  @Max(1_000)
   EVENTS_PAGE_MAX: number = 200;
 
   /** Comma-separated WebSocket CORS origins, or `*`. */

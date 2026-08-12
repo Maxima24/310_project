@@ -70,7 +70,19 @@ async function buildService(staleRows: AgentRow[]) {
     ],
   }).compile();
 
-  return { service: moduleRef.get(AgentLivenessService), prisma, agentDelegate, alerts, realtime };
+  const service = moduleRef.get(AgentLivenessService);
+
+  // Pretend the hub has been up for a while. `bootedAt` is set at construction, so
+  // a freshly built service is always inside its startup grace period — every test
+  // below except the grace-period ones needs a warm hub to exercise the sweep.
+  warmUp(service);
+
+  return { service, prisma, agentDelegate, alerts, realtime };
+}
+
+/** Backdates the service's boot time past the grace period. */
+function warmUp(service: AgentLivenessService, msAgo = TIMEOUT_MS * 2): void {
+  (service as unknown as { bootedAt: number }).bootedAt = Date.now() - msAgo;
 }
 
 describe('AgentLivenessService.sweep', () => {
@@ -136,5 +148,82 @@ describe('AgentLivenessService.sweep', () => {
 
     await expect(service.sweep()).resolves.toBeUndefined();
     expect(alerts.raiseAgentOffline).not.toHaveBeenCalled();
+  });
+
+  it('keeps sweeping the batch when one agent fails to alert', async () => {
+    // The whole batch is already marked offline, so bailing on the first failure
+    // would leave the rest silently unreported.
+    const { service, alerts } = await buildService([
+      { id: 'door-front', type: 'door', location: 'Front door', lastSeenAt: new Date(Date.now() - 40_000) },
+      { id: 'motion-hallway', type: 'motion', location: 'Hallway', lastSeenAt: new Date(Date.now() - 40_000) },
+    ]);
+    alerts.raiseAgentOffline.mockRejectedValueOnce(new Error('alert insert failed'));
+
+    await expect(service.sweep()).resolves.toBeUndefined();
+    expect(alerts.raiseAgentOffline).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe('AgentLivenessService startup grace period', () => {
+  it('does not sweep while the hub has been up for less than one timeout', async () => {
+    // Every agent's lastSeenAt is stale right after a restart, because the hub was
+    // not running to receive heartbeats. Sweeping here would declare the entire
+    // healthy fleet tampered-with and then clear it seconds later.
+    const { service, agentDelegate, alerts } = await buildService([
+      { id: 'door-front', type: 'door', location: 'Front door', lastSeenAt: new Date(Date.now() - 600_000) },
+    ]);
+    warmUp(service, 0); // just booted
+
+    await service.sweep();
+
+    expect(agentDelegate.findMany).not.toHaveBeenCalled();
+    expect(alerts.raiseAgentOffline).not.toHaveBeenCalled();
+  });
+
+  it('sweeps normally once the grace period has elapsed', async () => {
+    const { service, alerts } = await buildService([
+      { id: 'door-front', type: 'door', location: 'Front door', lastSeenAt: new Date(Date.now() - 600_000) },
+    ]);
+    warmUp(service, TIMEOUT_MS + 1_000);
+
+    await service.sweep();
+
+    expect(alerts.raiseAgentOffline).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('AgentLivenessService re-entrancy', () => {
+  it('skips a tick rather than overlapping a sweep that is still running', async () => {
+    const { service, prisma, alerts } = await buildService([
+      { id: 'door-front', type: 'door', location: 'Front door', lastSeenAt: new Date(Date.now() - 40_000) },
+    ]);
+
+    // Hold the transaction open so the second call arrives mid-sweep.
+    let release!: () => void;
+    const blocked = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    prisma.$transaction.mockImplementationOnce(async () => {
+      await blocked;
+      return [];
+    });
+
+    const first = service.sweep();
+    await service.sweep(); // must return immediately, not alert
+    release();
+    await first;
+
+    expect(alerts.raiseAgentOffline).not.toHaveBeenCalled();
+    expect(prisma.$transaction).toHaveBeenCalledTimes(1);
+  });
+
+  it('clears the re-entrancy flag after a failure so later ticks still run', async () => {
+    const { service, prisma } = await buildService([]);
+    prisma.$transaction.mockRejectedValueOnce(new Error('connection reset'));
+
+    await service.sweep();
+    await service.sweep();
+
+    expect(prisma.$transaction).toHaveBeenCalledTimes(2);
   });
 });

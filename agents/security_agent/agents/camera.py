@@ -14,7 +14,7 @@ import random
 import time
 from typing import Any
 
-from ..base import BaseAgent
+from ..base import AgentConfigurationError, BaseAgent
 from ..contracts import AgentType, EventType, SensorEvent
 from ..transport import Transport
 
@@ -23,6 +23,15 @@ log = logging.getLogger(__name__)
 #: Frames discarded while MOG2 learns the background. Without this the first frame
 #: is entirely "foreground" and every camera reports motion the instant it starts.
 WARMUP_FRAMES = 30
+
+#: Consecutive failed frame reads before trying to reopen the stream. RTSP blips are
+#: routine, so a handful of misses is not worth reconnecting over.
+MAX_READ_FAILURES = 25
+
+#: Reopen attempts before giving up. A camera that cannot deliver frames is blind,
+#: and a blind camera that keeps heartbeating is worse than one that stops: the hub
+#: would report it healthy forever. Exiting lets agent_offline tell the truth.
+MAX_REOPEN_ATTEMPTS = 3
 
 
 class CameraAgent(BaseAgent):
@@ -69,6 +78,8 @@ class CameraAgent(BaseAgent):
         self._capture: Any = None
         self._subtractor: Any = None
         self._kernel: Any = None
+        self._read_failures = 0
+        self._reopen_attempts = 0
 
     @property
     def agent_type(self) -> AgentType:
@@ -116,7 +127,7 @@ class CameraAgent(BaseAgent):
         try:
             import cv2  # noqa: PLC0415 - deliberately lazy; see module docstring
         except ImportError as exc:
-            raise RuntimeError(
+            raise AgentConfigurationError(
                 "Camera mode with --real needs OpenCV: "
                 "pip install -r requirements-hardware.txt\n"
                 "No wheel for your Python? opencv-python-headless often lags the "
@@ -129,9 +140,10 @@ class CameraAgent(BaseAgent):
         source = int(self._source) if str(self._source).isdigit() else self._source
         self._capture = cv2.VideoCapture(source)
         if not self._capture.isOpened():
-            raise RuntimeError(
+            raise AgentConfigurationError(
                 f"Could not open camera source {source!r}. For a webcam try --source 0; "
-                "for an IP camera pass the full rtsp:// URL."
+                "for an IP camera pass the full rtsp:// URL. On Windows, note that a "
+                "webcam already in use by another application cannot be opened here."
             )
 
         self._subtractor = cv2.createBackgroundSubtractorMOG2(
@@ -146,11 +158,16 @@ class CameraAgent(BaseAgent):
 
         ok, frame = self._capture.read()
         if not ok:
-            # A dropped frame on an RTSP stream is routine; returning None keeps
-            # the agent heartbeating rather than treating it as fatal.
-            log.debug("Frame read failed")
+            # A dropped frame is routine on RTSP, so absorb a run of them — but not
+            # indefinitely, or a camera whose stream died stays "online" and blind.
+            self._read_failures += 1
+            log.debug("Frame read failed (%s consecutive)", self._read_failures)
+            if self._read_failures >= MAX_READ_FAILURES:
+                self._reopen()
             return None
 
+        self._read_failures = 0
+        self._reopen_attempts = 0
         self._frame_index += 1
         mask = self._subtractor.apply(frame)
 
@@ -178,6 +195,43 @@ class CameraAgent(BaseAgent):
             # S3/MinIO, and add its URL here — metadata is free-form precisely so
             # this needs no migration.
         }
+
+    def _reopen(self) -> None:
+        """Tears the stream down and reopens it, giving up after a few attempts.
+
+        Raises AgentConfigurationError once out of attempts, which the poll loop
+        deliberately does not swallow — a camera that cannot produce frames should
+        stop and let the hub raise agent_offline, rather than sit there reporting
+        healthy heartbeats while seeing nothing.
+        """
+        self._reopen_attempts += 1
+        log.warning(
+            "No frames from %r after %s reads — reopening (attempt %s/%s)",
+            self._source,
+            self._read_failures,
+            self._reopen_attempts,
+            MAX_REOPEN_ATTEMPTS,
+        )
+
+        if self._reopen_attempts > MAX_REOPEN_ATTEMPTS:
+            raise AgentConfigurationError(
+                f"Camera source {self._source!r} stopped delivering frames and could not "
+                f"be reopened after {MAX_REOPEN_ATTEMPTS} attempts. The hub will raise "
+                "agent_offline for this agent, which is the honest signal — a camera that "
+                "cannot see should not report as healthy."
+            )
+
+        if self._capture is not None:
+            self._capture.release()
+
+        # Force a full re-open through _ensure_cv2, including a fresh background
+        # model: the scene may have changed while the stream was down, and reusing
+        # the old model would flag the whole frame as motion.
+        self._capture = None
+        self._subtractor = None
+        self._cv2 = None
+        self._frame_index = 0
+        self._read_failures = 0
 
     def on_shutdown(self) -> None:
         if self._capture is not None:

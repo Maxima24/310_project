@@ -17,6 +17,16 @@ log = logging.getLogger(__name__)
 AGENT_VERSION = "1.0.0"
 
 
+class AgentConfigurationError(RuntimeError):
+    """An unrecoverable setup problem: missing OpenCV, an unopenable camera, a bad pin.
+
+    Distinguished from ``TransportError`` because retrying cannot help. The poll loop
+    deliberately does NOT swallow this — an agent that cannot ever produce a reading
+    should exit with a clear message rather than log the same traceback every 200ms
+    while the hub happily reports it as online.
+    """
+
+
 class BaseAgent(ABC):
     """Common lifecycle for every collector agent.
 
@@ -138,12 +148,26 @@ class BaseAgent(ABC):
                 attempt += 1
 
     def _poll_loop(self) -> None:
+        consecutive_failures = 0
+
         while not self._stop.is_set():
             try:
                 events = self.poll()
+                consecutive_failures = 0
+            except AgentConfigurationError:
+                # Unrecoverable — let it propagate so run() unwinds and the CLI can
+                # print a fix. Retrying a missing OpenCV forever helps nobody.
+                raise
             except Exception:  # noqa: BLE001 - a flaky sensor must not kill the agent
-                log.exception("Sensor poll failed; continuing")
+                consecutive_failures += 1
+                log.exception("Sensor poll failed (%s in a row); continuing", consecutive_failures)
                 events = []
+                # A sensor failing every single poll is a broken sensor, not a blip.
+                # Back off so the log stays readable and the CPU stays idle; the
+                # heartbeat thread keeps running, so the hub still sees the agent as
+                # online — which is accurate, the process is alive.
+                if consecutive_failures >= 5:
+                    self._stop.wait(min(30.0, self.poll_interval * consecutive_failures))
 
             for event in events:
                 self._publish(event)
@@ -177,6 +201,16 @@ class BaseAgent(ABC):
             except TransportError as exc:
                 delay = self._backoff(attempt)
                 log.warning("Heartbeat failed (%s); retrying in %.1fs", exc, delay)
+                self._stop.wait(delay)
+                attempt += 1
+            except Exception:  # noqa: BLE001
+                # Catching only TransportError would let any other error kill this
+                # thread silently. The process would keep polling and reporting while
+                # never beating again, so the hub would raise agent_offline — a
+                # tamper alert for an agent that is demonstrably alive. Staying in
+                # the loop is strictly better than that.
+                delay = self._backoff(attempt)
+                log.exception("Unexpected heartbeat error; retrying in %.1fs", delay)
                 self._stop.wait(delay)
                 attempt += 1
 

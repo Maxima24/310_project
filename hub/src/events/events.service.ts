@@ -14,6 +14,9 @@ import { AlertsService } from '../alerts/alerts.service';
 import { PrismaService } from '../common/prisma/prisma.service';
 import { RealtimeGateway } from '../realtime/realtime.gateway';
 
+/** Agent-vs-hub clock difference that is worth telling the operator about. */
+const CLOCK_SKEW_WARN_MS = 5 * 60 * 1000;
+
 export interface IngestResult {
   event: EventView;
   /** The alert this event raised, or null if the rules stayed silent. */
@@ -61,7 +64,12 @@ export class EventsService {
       );
     }
 
-    await this.agents.touch(agent.id);
+    // An event is proof of life. Passing the loaded row lets this also clear an
+    // agent_offline alert if the agent was marked offline — a sensor that reports
+    // activity has demonstrably not been tampered with.
+    await this.agents.recordActivity(agent);
+
+    this.warnOnClockSkew(dto);
 
     const created = await this.prisma.event.create({
       data: {
@@ -83,6 +91,27 @@ export class EventsService {
     );
 
     return { event: view, alert };
+  }
+
+  /**
+   * Flags an agent whose clock is badly wrong, without rejecting its event.
+   *
+   * Deliberately a warning and not a validation error: `occurredAt` is agent-reported
+   * metadata, and refusing the request would discard a real sensor report because of
+   * a bad NTP setup. Ordering already uses the hub's own `createdAt`, so skew is a
+   * data-quality problem to surface, never a reason to lose an intrusion event.
+   */
+  private warnOnClockSkew(dto: CreateEventRequest): void {
+    const skewMs = Date.now() - new Date(dto.occurredAt).getTime();
+
+    if (Math.abs(skewMs) > CLOCK_SKEW_WARN_MS) {
+      const direction = skewMs < 0 ? 'ahead of' : 'behind';
+      this.logger.warn(
+        `Agent ${dto.agentId} clock is ${Math.round(Math.abs(skewMs) / 1000)}s ${direction} ` +
+          `the hub (occurredAt=${dto.occurredAt}). Event stored; ordering uses hub time. ` +
+          'Check the agent host clock/NTP.',
+      );
+    }
   }
 
   async findMany(query: QueryEventsRequest): Promise<EventView[]> {
