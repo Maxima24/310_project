@@ -180,6 +180,35 @@ export function useAcknowledge() {
 }
 
 /**
+ * Acknowledges every alert in a cluster.
+ *
+ * Twenty repeats of one problem are one decision for the operator, so making them
+ * twenty clicks would be the interface arguing with reality. Requests run sequentially
+ * rather than in parallel: this is a burst of writes against a single hub, and a
+ * thundering herd for a convenience feature is a poor trade.
+ */
+export function useAcknowledgeMany() {
+  const queryClient = useQueryClient();
+  const session = useSession();
+
+  return useMutation({
+    mutationFn: async (ids: string[]) => {
+      const acknowledged: AlertView[] = [];
+      for (const id of ids) {
+        acknowledged.push(await api.acknowledge(id));
+      }
+      return acknowledged;
+    },
+    onSuccess: (updated) => {
+      for (const alert of updated) upsertAlert(queryClient, session, alert);
+    },
+    // A partial failure leaves the cache disagreeing with the hub, so re-read rather
+    // than guess which of the writes landed.
+    onError: () => void queryClient.invalidateQueries({ queryKey: qk.alerts(session) }),
+  });
+}
+
+/**
  * Merge one alert into the cached list.
  *
  * Shared by the mutation and the socket handler: an alert arrives again when it is

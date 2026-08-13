@@ -803,15 +803,164 @@ button {
   }
 }
 
+/* ---------------------------------------------------------------- activity
+   Twelve hours of alert history as a density strip, so the list below only has to
+   carry what needs attention now. */
+.activity {
+  padding: 0 var(--s4) var(--s3);
+}
+
+.activity-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  margin-bottom: 6px;
+}
+
+.activity-quiet {
+  font-size: var(--text-xs);
+  color: var(--text-3);
+  font-variant-numeric: tabular-nums;
+}
+
+.activity-strip {
+  display: block;
+  width: 100%;
+  height: 34px;
+}
+
+/* Quiet slots stay as a faint baseline rather than disappearing, so a gap reads as
+   "nothing happened" instead of "no data". */
+.tick-none {
+  fill: var(--line-strong);
+}
+.tick-info {
+  fill: var(--text-3);
+}
+.tick-warning {
+  fill: var(--warn);
+}
+.tick-critical {
+  fill: var(--critical);
+}
+
+.activity-axis {
+  display: flex;
+  justify-content: space-between;
+  font-size: 10px;
+  color: var(--text-3);
+  margin-top: 2px;
+}
+
 /* ---------------------------------------------------------------- alerts */
+.panel-error {
+  margin: 0 var(--s4) var(--s2);
+  font-size: var(--text-xs);
+  color: var(--critical);
+}
+
+.all-clear {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--s2);
+  padding: var(--s6) var(--s4);
+  color: var(--text-2);
+  font-size: var(--text-sm);
+  border-top: 1px solid var(--line-soft);
+}
+
+.all-clear svg {
+  color: var(--ok);
+}
+
+/* Repeat counter. Reads as data, not a badge — it is a fact about the row, not a
+   status needing colour. */
+.repeat {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 700;
+  color: var(--text-2);
+  background: var(--surface-3);
+  border: 1px solid var(--line);
+  border-radius: var(--r-sm);
+  padding: 0 5px;
+  line-height: 16px;
+  cursor: pointer;
+}
+
+.repeat:hover {
+  color: var(--text);
+  border-color: var(--line-strong);
+}
+
+.occurrences {
+  list-style: none;
+  margin: var(--s2) 0 0;
+  padding: var(--s2) 0 0;
+  border-top: 1px dashed var(--line);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  max-height: 132px;
+  overflow-y: auto;
+}
+
+.occurrences li {
+  display: flex;
+  gap: var(--s3);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--text-2);
+  font-variant-numeric: tabular-nums;
+}
+
+.tiny {
+  font-size: var(--text-xs);
+}
+
+/* Acknowledged clusters fold away: recorded, not urgent. */
+.history {
+  border-top: 1px solid var(--line-soft);
+}
+
+.history-toggle {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  width: 100%;
+  padding: var(--s3) var(--s4);
+  background: none;
+  border: none;
+  color: var(--text-2);
+  font-size: var(--text-xs);
+  font-weight: 550;
+  cursor: pointer;
+  text-align: left;
+}
+
+.history-toggle:hover {
+  color: var(--text);
+  background: var(--surface-2);
+}
+
+.history-toggle svg {
+  transition: transform var(--fast);
+}
+
+.history-toggle .rot {
+  transform: rotate(180deg);
+}
+
 .alert-list {
   list-style: none;
   margin: 0;
-  padding: 0 var(--s4) var(--s4);
+  padding: var(--s1) var(--s4) var(--s4);
   display: flex;
   flex-direction: column;
   gap: var(--s2);
-  max-height: 420px;
+  max-height: 400px;
+  border-top: 1px solid var(--line-soft);
 }
 
 .alert {
