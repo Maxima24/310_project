@@ -35,7 +35,7 @@ from security_agent.sensors import (
     SimulatedDoorSensor,
     SimulatedMotionSensor,
 )
-from security_agent.transport import HttpTransport
+from security_agent.transport import HttpTransport, MqttTransport, Transport, TransportError
 
 DEFAULT_HUB = "http://localhost:3000"
 
@@ -181,6 +181,27 @@ def build_parser() -> argparse.ArgumentParser:
         "the agent uploads through (e.g. a container name vs a browser-reachable host).",
     )
 
+    net = parser.add_argument_group("transport (roadmap item 4)")
+    net.add_argument(
+        "--transport",
+        choices=["http", "mqtt"],
+        default=os.environ.get("AGENT_TRANSPORT", "http"),
+        help="How to reach the hub. HTTP is the default; mqtt uses a broker, which "
+        "scales better past ~20 agents and on flaky networks. Enrollment always uses "
+        "HTTP either way, since it is a request/response exchange returning a secret.",
+    )
+    net.add_argument(
+        "--mqtt-host",
+        default=os.environ.get("MQTT_HOST", "localhost"),
+        help="MQTT broker host (env MQTT_HOST).",
+    )
+    net.add_argument(
+        "--mqtt-port",
+        type=int,
+        default=int(os.environ.get("MQTT_PORT", "1883")),
+        help="MQTT broker port (env MQTT_PORT, default 1883).",
+    )
+
     creds = parser.add_argument_group("credentials")
     creds.add_argument(
         "--token-dir",
@@ -255,7 +276,7 @@ def build_evidence(
     return uploader, recorder
 
 
-def build_agent(args: argparse.Namespace, transport: HttpTransport) -> BaseAgent:
+def build_agent(args: argparse.Namespace, transport: Transport) -> BaseAgent:
     agent_type = AgentType(args.type)
 
     if agent_type is AgentType.MOTION:
@@ -328,7 +349,25 @@ def main(argv: list[str] | None = None) -> int:
         else TokenStore(args.id, Path(args.token_dir) if args.token_dir else None)
     )
 
-    transport = HttpTransport(args.hub, bootstrap_key, token_store=token_store)
+    # BaseAgent only ever touches the Transport interface, so this is the entire cost
+    # of switching transports — the agent logic above it is untouched.
+    transport: Transport
+    if args.transport == "mqtt":
+        try:
+            transport = MqttTransport(
+                args.mqtt_host,
+                args.mqtt_port,
+                args.hub,
+                bootstrap_key,
+                token_store=token_store,
+                agent_id=args.id,
+            )
+        except TransportError as exc:
+            # Missing paho-mqtt lands here; a traceback would obscure the one-line fix.
+            print(f"{exc}", file=sys.stderr)
+            return EXIT_BAD_ARGS
+    else:
+        transport = HttpTransport(args.hub, bootstrap_key, token_store=token_store)
 
     if args.heartbeat_interval >= 30.0:
         # The hub's default HEARTBEAT_TIMEOUT_MS is 30s, so beating this slowly gets

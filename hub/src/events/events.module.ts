@@ -10,5 +10,8 @@ import { EventsService } from './events.service';
   imports: [AgentsModule, AlertsModule, RealtimeModule],
   controllers: [EventsController],
   providers: [EventsService],
+  // Exported for MqttModule: MQTT ingestion routes through the same service so alert
+  // rules, dedup, and liveness cannot drift between the two transports.
+  exports: [EventsService],
 })
 export class EventsModule {}

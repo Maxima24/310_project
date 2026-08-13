@@ -127,6 +127,12 @@ class HttpTransport(Transport):
     def close(self) -> None:
         self._session.close()
 
+    @property
+    def token(self) -> str | None:
+        """The issued agent token, once enrolled. Used by MqttTransport to authenticate."""
+        with self._lock:
+            return self._token
+
     # -- internals ---------------------------------------------------------
 
     def _enqueue(self, event: SensorEvent) -> None:
@@ -281,27 +287,140 @@ class HttpTransport(Transport):
 
 
 class MqttTransport(Transport):
-    """Placeholder for roadmap item 4.
+    """MQTT transport (roadmap item 4, implemented).
 
-    At 20+ agents or on a flaky network, MQTT (Mosquitto + ``paho-mqtt`` here,
-    ``@nestjs/microservices`` on the hub) beats HTTP polling. Because ``BaseAgent``
-    only ever touches the ``Transport`` interface, that migration replaces this
-    class and one line of ``run_agent.py`` — no agent logic changes.
+    At 20+ agents or on a flaky network, MQTT beats HTTP polling: one persistent
+    connection per agent instead of a TCP handshake per heartbeat, and the broker
+    absorbs reconnects.
+
+    That this is a drop-in replacement is the payoff of the Transport interface —
+    ``BaseAgent`` never imported ``requests``, so nothing above this line changes.
+
+    Two deliberate asymmetries with HTTP:
+
+    * **Enrollment still uses HTTP.** Registration is a request/response exchange that
+      returns a secret; modelling it over pub/sub would mean a reply-topic dance for
+      no benefit. The agent enrolls once over HTTP, then publishes over MQTT.
+    * **QoS 1, not 0 or 2.** Losing a motion event is unacceptable, so QoS 0 is out.
+      QoS 2's exactly-once handshake costs two extra round trips per message, and the
+      hub already tolerates duplicates (the alert dedup window collapses them), so
+      at-least-once is the right trade.
     """
 
-    def __init__(self, *_args: object, **_kwargs: object) -> None:
-        raise NotImplementedError(
-            "MQTT transport is not implemented yet (roadmap item 4). Use HttpTransport."
+    #: Topic layout mirrors the REST paths, so the hub's routing reads the same.
+    TOPIC_EVENT = "cpe310/agents/{agent_id}/events"
+    TOPIC_HEARTBEAT = "cpe310/agents/{agent_id}/heartbeat"
+
+    def __init__(
+        self,
+        broker_host: str,
+        broker_port: int,
+        hub_url: str,
+        bootstrap_key: str,
+        *,
+        token_store: TokenStore | None = None,
+        agent_id: str | None = None,
+        keepalive: int = 30,
+        timeout: float = 5.0,
+    ) -> None:
+        try:
+            import paho.mqtt.client as mqtt  # noqa: PLC0415 - lazy, like cv2/boto3
+        except ImportError as exc:
+            raise TransportError(
+                "MQTT transport needs paho-mqtt: pip install -r requirements.txt"
+            ) from exc
+
+        self._mqtt = mqtt
+        self._host = broker_host
+        self._port = broker_port
+        self._keepalive = keepalive
+        #: Enrollment happens over HTTP; this handles that half and owns the token.
+        self._http = HttpTransport(
+            hub_url, bootstrap_key, token_store=token_store, timeout=timeout
         )
+        self._client = mqtt.Client(
+            client_id=f"cpe310-{agent_id or 'agent'}",
+            protocol=mqtt.MQTTv311,
+            callback_api_version=mqtt.CallbackAPIVersion.VERSION2,
+        )
+        self._connected = threading.Event()
+        self._client.on_connect = self._on_connect
+        self._client.on_disconnect = self._on_disconnect
 
-    def register(self, descriptor: AgentDescriptor) -> None:  # pragma: no cover
-        raise NotImplementedError
+    # -- Transport ---------------------------------------------------------
 
-    def heartbeat(self, agent_id: str) -> None:  # pragma: no cover
-        raise NotImplementedError
+    def register(self, descriptor: AgentDescriptor) -> None:
+        # Enroll over HTTP first so the token is available to authenticate publishes.
+        self._http.register(descriptor)
 
-    def publish_event(self, event: SensorEvent) -> None:  # pragma: no cover
-        raise NotImplementedError
+        token = self._http.token
+        if token:
+            # The broker authenticates the connection; the hub still needs to know
+            # which agent a message belongs to, so the token travels as the MQTT
+            # username. A shared bus means anyone who can publish could otherwise
+            # claim any agent id in the topic.
+            self._client.username_pw_set(descriptor.id, token)
 
-    def close(self) -> None:  # pragma: no cover
-        raise NotImplementedError
+        self._client.connect_async(self._host, self._port, keepalive=self._keepalive)
+        self._client.loop_start()
+
+        if not self._connected.wait(timeout=10.0):
+            raise TransportError(f"could not connect to MQTT broker at {self._host}:{self._port}")
+
+        log.info("Connected to MQTT broker %s:%s as %s", self._host, self._port, descriptor.id)
+
+    def heartbeat(self, agent_id: str) -> None:
+        self._publish(self.TOPIC_HEARTBEAT.format(agent_id=agent_id), {"agentId": agent_id})
+
+    def publish_event(self, event: SensorEvent) -> None:
+        self._publish(self.TOPIC_EVENT.format(agent_id=event.agent_id), event.to_payload())
+
+    def _authenticated(self, payload: dict) -> dict:
+        """Adds the agent token to the payload.
+
+        MQTT does not propagate a publisher's username to subscribers, so broker-level
+        credentials alone cannot tell the hub *which* agent a message came from — it
+        would have to trust the agent id in the topic, and on a shared bus any
+        publisher could put someone else's id there. Carrying the token in the payload
+        gives the hub the same proof of identity the HTTP header provides.
+
+        The broker connection should still be authenticated and, off localhost, TLS —
+        this is authentication for the hub, not a substitute for transport security.
+        """
+        token = self._http.token
+        if not token:
+            raise TransportError("no agent token — enroll before publishing over MQTT")
+        return {**payload, "token": token}
+
+    def close(self) -> None:
+        try:
+            self._client.loop_stop()
+            self._client.disconnect()
+        finally:
+            self._http.close()
+
+    # -- internals ---------------------------------------------------------
+
+    def _publish(self, topic: str, payload: dict) -> None:
+        import json  # noqa: PLC0415
+
+        info = self._client.publish(topic, json.dumps(self._authenticated(payload)), qos=1)
+        # rc is checked rather than waiting for the broker ack: blocking the poll loop
+        # on a network round trip is exactly what MQTT is meant to avoid, and paho
+        # queues the message for delivery on reconnect.
+        if info.rc != self._mqtt.MQTT_ERR_SUCCESS:
+            raise TransportError(f"MQTT publish to {topic} failed (rc={info.rc})")
+
+    def _on_connect(self, _client, _userdata, _flags, reason_code, _properties=None) -> None:
+        if reason_code == 0:
+            self._connected.set()
+        else:
+            log.warning("MQTT connection refused: %s", reason_code)
+
+    def _on_disconnect(self, _client, _userdata, _flags, reason_code, _properties=None) -> None:
+        self._connected.clear()
+        # paho's loop reconnects on its own; this is only worth noting.
+        log.warning("MQTT disconnected (%s) — paho will retry", reason_code)
+
+    def backoff_delay(self, attempt: int) -> float:
+        return self._http.backoff_delay(attempt)

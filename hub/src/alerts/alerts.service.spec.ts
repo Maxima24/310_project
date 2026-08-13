@@ -2,6 +2,7 @@ import { AlertSeverity, AlertType, EventType, SystemMode } from '@cpe310/contrac
 import { ConfigService } from '@nestjs/config';
 import { Test } from '@nestjs/testing';
 
+import { NotificationsService } from '../notifications/notifications.service';
 import { PrismaService } from '../common/prisma/prisma.service';
 import { RealtimeGateway } from '../realtime/realtime.gateway';
 import { SystemService } from '../system/system.service';
@@ -53,6 +54,8 @@ async function buildService(mode: SystemMode = SystemMode.Away) {
     }),
   };
 
+  const notifications = { dispatch: jest.fn().mockResolvedValue(undefined) };
+
   const moduleRef = await Test.createTestingModule({
     providers: [
       AlertsService,
@@ -60,10 +63,11 @@ async function buildService(mode: SystemMode = SystemMode.Away) {
       { provide: RealtimeGateway, useValue: realtime },
       { provide: SystemService, useValue: system },
       { provide: ConfigService, useValue: config },
+      { provide: NotificationsService, useValue: notifications },
     ],
   }).compile();
 
-  return { service: moduleRef.get(AlertsService), prisma, realtime, system };
+  return { service: moduleRef.get(AlertsService), prisma, realtime, system, notifications };
 }
 
 describe('AlertsService.evaluateEvent', () => {
@@ -94,6 +98,33 @@ describe('AlertsService.evaluateEvent', () => {
     expect(alert).toBeNull();
     expect(prisma.alert.create).not.toHaveBeenCalled();
     expect(realtime.emitAlert).not.toHaveBeenCalled();
+  });
+
+  it('hands the alert to the notification fan-out', async () => {
+    const { service, notifications } = await buildService(SystemMode.Away);
+
+    const alert = await service.evaluateEvent(agent, EventType.MotionDetected, 'event-1');
+
+    expect(notifications.dispatch).toHaveBeenCalledWith(alert);
+  });
+
+  it('does not notify when no alert was raised', async () => {
+    const { service, notifications } = await buildService(SystemMode.Home);
+
+    await service.evaluateEvent(agent, EventType.MotionDetected, 'event-1');
+
+    expect(notifications.dispatch).not.toHaveBeenCalled();
+  });
+
+  it('still returns the alert when notification dispatch rejects', async () => {
+    // Fan-out is fire-and-forget: the alert is already persisted and broadcast, so a
+    // failing SMTP server must not turn a successful ingestion into an error.
+    const { service, notifications } = await buildService(SystemMode.Away);
+    notifications.dispatch.mockRejectedValue(new Error('smtp down'));
+
+    const alert = await service.evaluateEvent(agent, EventType.MotionDetected, 'event-1');
+
+    expect(alert).not.toBeNull();
   });
 });
 

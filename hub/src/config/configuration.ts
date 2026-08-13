@@ -23,9 +23,36 @@ export interface AppConfig {
   alerts: {
     cooldownMs: number;
   };
+  notifications: {
+    maxAttempts: number;
+    retryCron: string;
+    email: {
+      host?: string;
+      port: number;
+      secure: boolean;
+      user?: string;
+      pass?: string;
+      from: string;
+      to?: string;
+      minSeverity: string;
+    };
+    webhook: {
+      url?: string;
+      secret?: string;
+      timeoutMs: number;
+      minSeverity: string;
+    };
+    log: {
+      minSeverity: string;
+    };
+  };
   pagination: {
     defaultLimit: number;
     maxLimit: number;
+  };
+  mqtt: {
+    /** Undefined means HTTP-only ingestion. */
+    url?: string;
   };
 }
 
@@ -53,9 +80,35 @@ export function loadConfiguration(): AppConfig {
     alerts: {
       cooldownMs: env.ALERT_COOLDOWN_MS,
     },
+    notifications: {
+      maxAttempts: env.NOTIFY_MAX_ATTEMPTS,
+      retryCron: env.NOTIFY_RETRY_CRON,
+      email: {
+        host: env.SMTP_HOST,
+        port: env.SMTP_PORT,
+        secure: env.SMTP_SECURE,
+        user: env.SMTP_USER,
+        pass: env.SMTP_PASS,
+        from: env.ALERT_EMAIL_FROM,
+        to: env.ALERT_EMAIL_TO,
+        minSeverity: env.EMAIL_MIN_SEVERITY,
+      },
+      webhook: {
+        url: env.ALERT_WEBHOOK_URL,
+        secret: env.ALERT_WEBHOOK_SECRET,
+        timeoutMs: env.ALERT_WEBHOOK_TIMEOUT_MS,
+        minSeverity: env.WEBHOOK_MIN_SEVERITY,
+      },
+      log: {
+        minSeverity: env.LOG_MIN_SEVERITY,
+      },
+    },
     pagination: {
       defaultLimit: env.EVENTS_PAGE_LIMIT,
       maxLimit: env.EVENTS_PAGE_MAX,
+    },
+    mqtt: {
+      url: env.MQTT_URL,
     },
   };
 }

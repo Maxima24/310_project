@@ -5,3 +5,7 @@ requests>=2.32,<3
 # requirements.txt && pytest` just works for a marker.
 pytest>=8.3,<9
 responses>=0.25,<1
+
+# MQTT transport (--transport mqtt, roadmap item 4). Imported lazily, so the
+# default HTTP transport does not require it at runtime.
+paho-mqtt>=2.1,<3

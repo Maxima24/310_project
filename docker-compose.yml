@@ -73,9 +73,58 @@ services:
       HEARTBEAT_TIMEOUT_MS: ${HEARTBEAT_TIMEOUT_MS:-30000}
       ALERT_COOLDOWN_MS: ${ALERT_COOLDOWN_MS:-60000}
       CORS_ORIGIN: '*'
+      # Notification fan-out. Mailpit accepts anything, so email works out of the box;
+      # point SMTP_HOST at a real provider and set credentials for production.
+      SMTP_HOST: ${SMTP_HOST:-mailpit}
+      SMTP_PORT: ${SMTP_PORT:-1025}
+      ALERT_EMAIL_TO: ${ALERT_EMAIL_TO:-security-team@example.test}
+      ALERT_EMAIL_FROM: ${ALERT_EMAIL_FROM:-security-hub@example.test}
+      # Unset by default — the webhook channel stays inert until a URL is given.
+      ALERT_WEBHOOK_URL: ${ALERT_WEBHOOK_URL:-}
+      ALERT_WEBHOOK_SECRET: ${ALERT_WEBHOOK_SECRET:-}
+      # Enables MQTT ingestion alongside REST. Unset it for HTTP-only.
+      MQTT_URL: ${MQTT_URL:-mqtt://mosquitto:1883}
     depends_on:
       postgres:
         condition: service_healthy
+      mailpit:
+        condition: service_started
+      mosquitto:
+        condition: service_started
+
+  # MQTT broker (roadmap item 4). The hub subscribes alongside its REST ingestion, so
+  # both transports are live; agents choose with --transport.
+  mosquitto:
+    image: eclipse-mosquitto:2
+    restart: unless-stopped
+    ports:
+      - '${MQTT_PORT:-1883}:1883'
+    # Anonymous access is fine for a local demo bus. On a real network this wants
+    # per-agent broker credentials plus topic ACLs, and TLS — the hub already verifies
+    # the agent token in each payload, but that is authentication, not confidentiality.
+    command: >
+      sh -c "printf 'listener 1883\nallow_anonymous true\npersistence false\n' > /mosquitto/config/mosquitto.conf
+      && exec mosquitto -c /mosquitto/config/mosquitto.conf"
+    healthcheck:
+      test: ['CMD-SHELL', 'mosquitto_sub -t healthcheck -C 1 -W 2 -h 127.0.0.1 || true']
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+
+  # SMTP sink for notification fan-out (roadmap item 3). Captures every alert email
+  # so the whole path is verifiable locally instead of needing a real mail provider.
+  # Web inbox at http://localhost:8025.
+  mailpit:
+    image: axllent/mailpit:latest
+    restart: unless-stopped
+    ports:
+      - '${MAILPIT_SMTP_PORT:-1025}:1025'
+      - '${MAILPIT_UI_PORT:-8025}:8025'
+    environment:
+      MP_MAX_MESSAGES: 500
+      MP_SMTP_AUTH_ACCEPT_ANY: 1
+      MP_SMTP_AUTH_ALLOW_INSECURE: 1
 
   # Object store for video evidence (roadmap item 5). S3-compatible, so switching to
   # real S3 is an endpoint and credentials change, not a code change.
@@ -106,9 +155,21 @@ services:
     <<: *agent-common
     command: ['--type', 'motion', '--id', 'motion-hallway', '--location', 'Hallway']
 
+  # Runs over MQTT rather than HTTP, so `docker compose up` exercises both transports
+  # at once and proves the Transport abstraction was worth having.
   agent-door:
     <<: *agent-common
-    command: ['--type', 'door', '--id', 'door-front', '--location', 'Front door']
+    command:
+      - '--type'
+      - 'door'
+      - '--id'
+      - 'door-front'
+      - '--location'
+      - 'Front door'
+      - '--transport'
+      - 'mqtt'
+      - '--mqtt-host'
+      - 'mosquitto'
 
   # Simulation only. `--real --source 0` cannot work here: Docker Desktop on
   # Windows and macOS has no USB/webcam passthrough. To test a real camera, run

@@ -8,6 +8,7 @@ import { Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import type { Alert, Prisma } from '@prisma/client';
 
+import { NotificationsService } from '../notifications/notifications.service';
 import { PrismaService } from '../common/prisma/prisma.service';
 import { RealtimeGateway } from '../realtime/realtime.gateway';
 import { SystemService } from '../system/system.service';
@@ -22,6 +23,7 @@ export class AlertsService {
     private readonly realtime: RealtimeGateway,
     private readonly system: SystemService,
     private readonly config: ConfigService,
+    private readonly notifications: NotificationsService,
   ) {}
 
   private get cooldownMs(): number {
@@ -182,18 +184,19 @@ export class AlertsService {
   }
 
   /**
-   * Notification fan-out seam (roadmap item 3).
+   * Notification fan-out (roadmap item 3, implemented).
    *
-   * Persistence and the live feed are already handled above; this is where an
-   * out-of-band channel hooks in so a critical alert reaches a human who is not
-   * watching a dashboard.
-   *
-   * TODO(roadmap-3): dispatch to Twilio (SMS), FCM (push), or nodemailer (email).
-   * Do it on a queue rather than inline — a slow provider must not delay event
-   * ingestion, and a failed send must be retryable without dropping the alert.
+   * Deliberately fire-and-forget: an SMTP handshake or a slow webhook must not delay
+   * event ingestion, and the alert is already persisted and broadcast by this point,
+   * so a delivery failure cannot lose it. Retries and per-channel outcomes are the
+   * dispatcher's job, recorded in the Notification table.
    */
   private notify(alert: AlertView): void {
-    void alert;
+    void this.notifications.dispatch(alert).catch((error: unknown) => {
+      this.logger.error(
+        `Notification dispatch failed for ${alert.id}: ${(error as Error).message}`,
+      );
+    });
   }
 }
 

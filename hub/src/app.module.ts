@@ -11,6 +11,8 @@ import { SecurityModule } from './common/security/security.module';
 import { loadConfiguration } from './config/configuration';
 import { EventsModule } from './events/events.module';
 import { HealthController } from './health.controller';
+import { MqttModule } from './mqtt/mqtt.module';
+import { NotificationsModule } from './notifications/notifications.module';
 import { RealtimeModule } from './realtime/realtime.module';
 import { SystemModule } from './system/system.module';
 
@@ -28,9 +30,11 @@ import { SystemModule } from './system/system.module';
     SecurityModule,
     RealtimeModule,
     SystemModule,
+    NotificationsModule,
     AlertsModule,
     AgentsModule,
     EventsModule,
+    MqttModule,
   ],
   controllers: [HealthController],
   providers: [

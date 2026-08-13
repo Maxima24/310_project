@@ -1,5 +1,6 @@
 import { plainToInstance } from 'class-transformer';
 import {
+  IsBoolean,
   IsEnum,
   IsInt,
   IsNotEmpty,
@@ -15,6 +16,13 @@ export enum NodeEnv {
   Development = 'development',
   Production = 'production',
   Test = 'test',
+}
+
+/** Mirrors AlertSeverity; declared here so the env class can validate against it. */
+export enum SeverityLevel {
+  Info = 'info',
+  Warning = 'warning',
+  Critical = 'critical',
 }
 
 /** Sample secrets shipped in `.env.example`. Refused in production. */
@@ -108,6 +116,80 @@ export class EnvVars {
   /** Comma-separated WebSocket CORS origins, or `*`. */
   @IsString()
   CORS_ORIGIN: string = '*';
+
+  // --- Notification fan-out (roadmap item 3) --------------------------------
+  // Each channel is inert until configured, so an unset SMTP_HOST simply means no
+  // email rather than a failed delivery per alert.
+
+  @IsInt()
+  @Min(1)
+  @Max(20)
+  NOTIFY_MAX_ATTEMPTS: number = 5;
+
+  @IsString()
+  @IsNotEmpty()
+  NOTIFY_RETRY_CRON: string = '*/30 * * * * *';
+
+  @IsOptional()
+  @IsString()
+  SMTP_HOST?: string;
+
+  @IsInt()
+  @Min(1)
+  @Max(65535)
+  SMTP_PORT: number = 1025;
+
+  @IsBoolean()
+  SMTP_SECURE: boolean = false;
+
+  @IsOptional()
+  @IsString()
+  SMTP_USER?: string;
+
+  @IsOptional()
+  @IsString()
+  SMTP_PASS?: string;
+
+  @IsString()
+  ALERT_EMAIL_FROM: string = 'security-hub@localhost';
+
+  /** Without a recipient the email channel stays inert. */
+  @IsOptional()
+  @IsString()
+  ALERT_EMAIL_TO?: string;
+
+  @IsOptional()
+  @IsString()
+  ALERT_WEBHOOK_URL?: string;
+
+  @IsOptional()
+  @IsString()
+  ALERT_WEBHOOK_SECRET?: string;
+
+  @IsInt()
+  @Min(500)
+  ALERT_WEBHOOK_TIMEOUT_MS: number = 5_000;
+
+  /**
+   * Per-channel severity floors. Waking someone at 3am for an `info` recovery notice
+   * is how an alarm gets ignored, so email and webhook default to `warning` while the
+   * log channel records everything.
+   */
+  @IsEnum(SeverityLevel)
+  EMAIL_MIN_SEVERITY: SeverityLevel = SeverityLevel.Warning;
+
+  @IsEnum(SeverityLevel)
+  WEBHOOK_MIN_SEVERITY: SeverityLevel = SeverityLevel.Warning;
+
+  @IsEnum(SeverityLevel)
+  LOG_MIN_SEVERITY: SeverityLevel = SeverityLevel.Info;
+
+  // --- MQTT ingestion (roadmap item 4) --------------------------------------
+  // Unset means HTTP-only, which stays the default. Set to enable the second
+  // transport alongside REST, e.g. mqtt://mosquitto:1883.
+  @IsOptional()
+  @IsString()
+  MQTT_URL?: string;
 }
 
 /** Keys that arrive as strings from the environment but must be numbers. */
@@ -118,7 +200,13 @@ const NUMERIC_KEYS = [
   'ALERT_COOLDOWN_MS',
   'EVENTS_PAGE_LIMIT',
   'EVENTS_PAGE_MAX',
+  'NOTIFY_MAX_ATTEMPTS',
+  'SMTP_PORT',
+  'ALERT_WEBHOOK_TIMEOUT_MS',
 ] as const;
+
+/** Keys that arrive as strings but must be booleans. */
+const BOOLEAN_KEYS = ['SMTP_SECURE'] as const;
 
 export function validateEnv(raw: Record<string, unknown>): EnvVars {
   // Drop blank values so `FOO=` in a .env file falls back to the class default
@@ -129,6 +217,11 @@ export function validateEnv(raw: Record<string, unknown>): EnvVars {
   }
   for (const key of NUMERIC_KEYS) {
     if (cleaned[key] !== undefined) cleaned[key] = Number(cleaned[key]);
+  }
+  for (const key of BOOLEAN_KEYS) {
+    if (cleaned[key] !== undefined) {
+      cleaned[key] = ['true', '1', 'yes'].includes(String(cleaned[key]).toLowerCase());
+    }
   }
 
   const config = plainToInstance(EnvVars, cleaned, { exposeDefaultValues: true });
