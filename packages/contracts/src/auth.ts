@@ -46,6 +46,11 @@ export const Permission = {
   EventsWrite: 'events:write',
   /** An agent proving liveness. */
   AgentsHeartbeat: 'agents:heartbeat',
+  /** Watching a camera's live view. Separate from AgentsRead: knowing a camera exists
+   *  and being allowed to look through it are different things. */
+  CamerasView: 'cameras:view',
+  /** A camera agent pushing its own frames. */
+  CamerasPublish: 'cameras:publish',
 } as const;
 
 export type Permission = (typeof Permission)[keyof typeof Permission];
@@ -55,6 +60,7 @@ const VIEWER_PERMISSIONS: Permission[] = [
   Permission.EventsRead,
   Permission.AlertsRead,
   Permission.SystemModeRead,
+  Permission.CamerasView,
 ];
 
 const OPERATOR_PERMISSIONS: Permission[] = [
@@ -74,7 +80,11 @@ const OPERATOR_PERMISSIONS: Permission[] = [
  */
 export const ROLE_PERMISSIONS: Record<AuthRole, readonly Permission[]> = {
   [AuthRole.Bootstrap]: [Permission.AgentsEnroll],
-  [AuthRole.Agent]: [Permission.EventsWrite, Permission.AgentsHeartbeat],
+  [AuthRole.Agent]: [
+    Permission.EventsWrite,
+    Permission.AgentsHeartbeat,
+    Permission.CamerasPublish,
+  ],
   [AuthRole.Viewer]: VIEWER_PERMISSIONS,
   [AuthRole.Operator]: OPERATOR_PERMISSIONS,
   [AuthRole.Admin]: [...OPERATOR_PERMISSIONS, Permission.NotificationsRead],

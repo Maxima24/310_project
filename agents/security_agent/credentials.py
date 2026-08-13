@@ -13,6 +13,7 @@ noise.
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import stat
@@ -32,6 +33,12 @@ class TokenStore:
         self.agent_id = agent_id
         self.directory = Path(directory) if directory else DEFAULT_TOKEN_DIR
         self.path = self.directory / f"{agent_id}.token"
+        #: What was registered alongside the current token. Reusing a cached token means
+        #: skipping registration entirely, so without this the hub keeps whatever
+        #: type, location, and capabilities the agent had when it FIRST enrolled — a
+        #: camera switched from simulation to a real lens would still be listed as
+        #: simulated, which is worse than useless on a security console.
+        self.descriptor_path = self.directory / f"{agent_id}.registered.json"
 
     def load(self) -> str | None:
         try:
@@ -62,10 +69,29 @@ class TokenStore:
             )
 
     def clear(self) -> None:
+        for path in (self.path, self.descriptor_path):
+            try:
+                path.unlink(missing_ok=True)
+            except OSError as exc:
+                log.warning("Could not remove stale credential file %s (%s)", path, exc)
+
+    def load_descriptor(self) -> dict | None:
+        """What was last registered with this token, or None if unknown."""
         try:
-            self.path.unlink(missing_ok=True)
+            return json.loads(self.descriptor_path.read_text(encoding="utf-8"))
+        except (FileNotFoundError, ValueError):
+            return None
         except OSError as exc:
-            log.warning("Could not remove stale token %s (%s)", self.path, exc)
+            log.warning("Could not read %s (%s)", self.descriptor_path, exc)
+            return None
+
+    def save_descriptor(self, payload: dict) -> None:
+        try:
+            self.directory.mkdir(parents=True, exist_ok=True)
+            self.descriptor_path.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
+        except OSError as exc:
+            # Only costs an unnecessary re-registration next start.
+            log.debug("Could not record the registered descriptor (%s)", exc)
 
     def _restrict_permissions(self) -> None:
         """Owner-only, best effort.

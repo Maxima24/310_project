@@ -3,6 +3,7 @@ import { useMemo } from 'react';
 import { AgentGrid } from './components/AgentGrid';
 import { AlertList } from './components/AlertList';
 import { EventStream } from './components/EventStream';
+import { LiveView } from './components/LiveView';
 import { ModeControl } from './components/ModeControl';
 import { TopBar } from './components/TopBar';
 import { useHubSocket } from './lib/useHubSocket';
@@ -62,6 +63,13 @@ export function Dashboard() {
               Agents <span className="badge">{agents.data?.length ?? 0}</span>
             </h2>
             <AgentGrid agents={agents.data ?? []} loading={agents.isPending} />
+          </section>
+        )}
+
+        {canReadAgents && (
+          <section className="panel panel-wide">
+            <h2>Live view</h2>
+            <LiveView />
           </section>
         )}
 

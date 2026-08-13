@@ -12,7 +12,7 @@ import { useQueryClient } from '@tanstack/react-query';
 import { useEffect, useRef } from 'react';
 import { io, type Socket } from 'socket.io-client';
 
-import { useSessionStore } from '../stores/session.store';
+import { currentSessionId, useSessionStore } from '../stores/session.store';
 import { WS_URL } from './config';
 import { CACHE_LIMITS, qk, upsertAlert } from './queries';
 
@@ -37,6 +37,11 @@ export function useHubSocket(credential: string, enabled: boolean): void {
   useEffect(() => {
     if (!enabled || !credential) return;
 
+    // Captured once per connection. Query keys are session-scoped, so a push must land
+    // in the cache belonging to the identity that opened this socket — not whichever
+    // one happens to be current when a late frame arrives.
+    const session = currentSessionId();
+
     setConnection('connecting');
 
     const socket = io(WS_URL, {
@@ -59,19 +64,19 @@ export function useHubSocket(credential: string, enabled: boolean): void {
     socket.on('connect_error', () => setConnection('offline'));
 
     socket.on(WS_EVENT, (event: EventView) => {
-      queryClient.setQueryData<EventView[]>(qk.events, (current) =>
+      queryClient.setQueryData<EventView[]>(qk.events(session), (current) =>
         [event, ...(current ?? [])].slice(0, CACHE_LIMITS.MAX_EVENTS),
       );
     });
 
-    socket.on(WS_ALERT, (alert: AlertView) => upsertAlert(queryClient, alert));
+    socket.on(WS_ALERT, (alert: AlertView) => upsertAlert(queryClient, session, alert));
 
     socket.on(WS_MODE, (mode: SystemModeResponse) => {
-      queryClient.setQueryData(qk.mode, mode);
+      queryClient.setQueryData(qk.mode(session), mode);
     });
 
     socket.on(WS_AGENT, (agent: AgentView) => {
-      queryClient.setQueryData<AgentView[]>(qk.agents, (current) => {
+      queryClient.setQueryData<AgentView[]>(qk.agents(session), (current) => {
         const list = current ?? [];
         const index = list.findIndex((a) => a.id === agent.id);
         if (index === -1) return [...list, agent];

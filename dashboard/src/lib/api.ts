@@ -2,9 +2,11 @@ import type {
   AgentView,
   AlertView,
   AuthRole,
+  CameraStatusView,
   EventView,
   IdentityResponse,
   NotificationView,
+  StreamTicketResponse,
   SystemMode,
   SystemModeChangeResponse,
   SystemModeResponse,
@@ -47,15 +49,37 @@ export class ApiError extends Error {
   }
 }
 
+/**
+ * A hub that accepts the connection but never answers would otherwise leave the UI on
+ * a spinner indefinitely. Ten seconds is far longer than any of these endpoints needs,
+ * so a timeout here means something is genuinely wrong and the user should be told.
+ */
+const REQUEST_TIMEOUT_MS = 10_000;
+
 async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
-  const response = await fetch(`${API_BASE}${path}`, {
-    ...init,
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${currentCredential()}`,
-      ...init.headers,
-    },
-  });
+  let response: Response;
+
+  try {
+    response = await fetch(`${API_BASE}${path}`, {
+      ...init,
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${currentCredential()}`,
+        ...init.headers,
+      },
+    });
+  } catch (error) {
+    // Distinguish "took too long" from "could not connect": they need different fixes,
+    // and "Failed to fetch" tells the user nothing.
+    const timedOut = error instanceof DOMException && error.name === 'TimeoutError';
+    throw new ApiError(
+      0,
+      timedOut
+        ? `The hub did not respond within ${REQUEST_TIMEOUT_MS / 1000}s.`
+        : 'Could not reach the hub. Is it running?',
+    );
+  }
 
   if (!response.ok) {
     throw await toApiError(response);
@@ -118,4 +142,13 @@ export const api = {
     }),
 
   acknowledge: (id: string) => request<AlertView>(`/alerts/${id}/ack`, { method: 'POST' }),
+
+  cameras: () => request<CameraStatusView[]>('/cameras'),
+
+  /**
+   * Exchanges the operator credential for a single-use stream ticket. Needed because
+   * the `<img>` that consumes the stream cannot send an Authorization header.
+   */
+  streamTicket: (agentId: string) =>
+    request<StreamTicketResponse>(`/cameras/${agentId}/ticket`, { method: 'POST' }),
 };

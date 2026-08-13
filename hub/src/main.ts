@@ -20,6 +20,11 @@ async function bootstrap(): Promise<void> {
   });
   app.useBodyParser('json', { limit: '64kb' });
 
+  // Camera frames are JPEG, not JSON, and a 64kB cap would reject every one of them.
+  // Scoped by content type so this larger ceiling applies ONLY to image bodies —
+  // an oversized JSON payload is still refused above.
+  app.useBodyParser('raw', { type: 'image/jpeg', limit: '2mb' });
+
   const config = app.get(ConfigService);
   const port = config.get<number>('port') ?? 3000;
 

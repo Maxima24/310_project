@@ -108,17 +108,55 @@ def test_a_missing_enrollment_token_in_the_response_is_an_error(
 
 
 @responses.activate
-def test_register_skips_enrollment_when_a_token_is_already_cached(tmp_path) -> None:
+def test_register_skips_enrollment_when_nothing_has_changed(tmp_path) -> None:
     # Re-enrolling on every restart would rotate the token needlessly and bury a
     # genuine unexpected rotation in the hub's audit log.
     store = TokenStore("motion-hallway", tmp_path)
     store.save(TOKEN)
+    store.save_descriptor(DESCRIPTOR.to_payload())
     t = HttpTransport(HUB, BOOTSTRAP, token_store=store, timeout=0.5)
 
     t.register(DESCRIPTOR)
 
     assert len(responses.calls) == 0
     assert t._token == TOKEN
+
+
+@responses.activate
+def test_register_re_enrolls_when_the_agent_description_changed(tmp_path) -> None:
+    """The hub only learns type, location, and capabilities at registration.
+
+    Skipping it unconditionally froze that record at whatever was true on first run — a
+    camera moved to another room, or switched from simulation to a real lens, kept
+    advertising the old description on the operator's console.
+    """
+    store = TokenStore("motion-hallway", tmp_path)
+    store.save(TOKEN)
+    store.save_descriptor({**DESCRIPTOR.to_payload(), "location": "Old room"})
+    t = HttpTransport(HUB, BOOTSTRAP, token_store=store, timeout=0.5)
+    responses.post(f"{HUB}/agents/register", json=enrollment_body(TOKEN2, rotated=True), status=200)
+
+    t.register(DESCRIPTOR)
+
+    assert len(responses.calls) == 1
+    assert t._token == TOKEN2
+    # And the new description is recorded, so the NEXT start skips again.
+    assert store.load_descriptor() == DESCRIPTOR.to_payload()
+
+
+@responses.activate
+def test_register_re_enrolls_when_no_descriptor_was_ever_recorded(tmp_path) -> None:
+    # Upgrade path: an agent whose token predates descriptor tracking re-registers once
+    # to bring the hub's record in sync, then settles down.
+    store = TokenStore("motion-hallway", tmp_path)
+    store.save(TOKEN)
+    t = HttpTransport(HUB, BOOTSTRAP, token_store=store, timeout=0.5)
+    responses.post(f"{HUB}/agents/register", json=enrollment_body(TOKEN2), status=200)
+
+    t.register(DESCRIPTOR)
+
+    assert len(responses.calls) == 1
+    assert store.load_descriptor() == DESCRIPTOR.to_payload()
 
 
 def test_a_cached_token_survives_a_restart(tmp_path) -> None:

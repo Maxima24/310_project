@@ -105,9 +105,19 @@ class HttpTransport(Transport):
             self._descriptor = descriptor
             have_token = self._token is not None
 
-        if have_token:
-            log.info("Reusing stored token for %s (no re-enrollment needed)", descriptor.id)
-            return
+        # Re-enroll when what we would register has CHANGED, even though a token exists.
+        # The hub only learns an agent's type, location, and capabilities at
+        # registration, so skipping it unconditionally leaves that record frozen at
+        # whatever was true on first run — a camera moved to a new room, or switched
+        # from simulation to a real lens, would keep advertising the old description.
+        if have_token and self._token_store is not None:
+            registered = self._token_store.load_descriptor()
+            if registered == descriptor.to_payload():
+                log.info("Reusing stored token for %s (nothing changed)", descriptor.id)
+                return
+            log.info(
+                "Agent description changed since enrollment; re-registering %s", descriptor.id
+            )
 
         self._enroll(descriptor)
 
@@ -132,6 +142,38 @@ class HttpTransport(Transport):
         """The issued agent token, once enrolled. Used by MqttTransport to authenticate."""
         with self._lock:
             return self._token
+
+    def publish_frame(self, agent_id: str, jpeg: bytes) -> None:
+        """Posts one JPEG frame for the live view.
+
+        Deliberately fire-and-forget and NOT buffered like events are: a frame that
+        failed to send is worthless a moment later, and queueing them would build a
+        backlog of stale pictures to replay at whoever looks next. Events are evidence
+        and must survive an outage; frames are a window and must not.
+
+        Raises TransportError so the caller can log at a low level and move on.
+        """
+        with self._lock:
+            token = self._token
+        if token is None:
+            raise TransportError("no agent token - enroll before streaming")
+
+        url = f"{self._base}/cameras/{agent_id}/frame"
+        try:
+            response = self._session.post(
+                url,
+                data=jpeg,
+                headers={
+                    "Authorization": f"Bearer {token}",
+                    "Content-Type": "image/jpeg",
+                },
+                timeout=self._timeout,
+            )
+        except requests.RequestException as exc:
+            raise TransportError(f"{url} unreachable: {exc}") from exc
+
+        if not response.ok:
+            raise TransportError(f"{url} returned {response.status_code}")
 
     # -- internals ---------------------------------------------------------
 
@@ -191,6 +233,9 @@ class HttpTransport(Transport):
             self._token = token
         if self._token_store:
             self._token_store.save(token)
+            # Recorded so the next start can tell whether anything about this agent
+            # changed, and re-register only when it did.
+            self._token_store.save_descriptor(descriptor.to_payload())
 
         log.info("Enrolled with hub at %s as %s", self._base, descriptor.id)
 

@@ -12,6 +12,17 @@ export default defineConfig({
         target: process.env.HUB_URL ?? 'http://localhost:3000',
         changeOrigin: true,
         rewrite: (path) => path.replace(/^\/api/, ''),
+        configure: (proxy) => {
+          // The MJPEG stream is one response that never ends. Node's default socket
+          // timeout would cut it off mid-view, and compression would buffer frames
+          // until the buffer filled, making a live feed lag by seconds.
+          proxy.on('proxyReq', (proxyReq) => {
+            proxyReq.setHeader('Accept-Encoding', 'identity');
+          });
+          proxy.on('proxyRes', (proxyRes) => {
+            proxyRes.headers['x-no-compression'] = '1';
+          });
+        },
       },
       '/socket.io': {
         target: process.env.HUB_URL ?? 'http://localhost:3000',

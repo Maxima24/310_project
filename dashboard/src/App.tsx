@@ -1,5 +1,4 @@
-import { useQueryClient } from '@tanstack/react-query';
-import { useEffect, useRef } from 'react';
+import { useEffect } from 'react';
 
 import { Dashboard } from './Dashboard';
 import { SignIn } from './components/SignIn';
@@ -19,21 +18,12 @@ export function App() {
   const credential = useSessionStore((s) => s.credential);
   const signOut = useSessionStore((s) => s.signOut);
   const identity = useIdentity();
-  const queryClient = useQueryClient();
-  const previousCredential = useRef(credential);
 
-  // Wipe the cache whenever the credential changes.
-  //
-  // Without this, signing out of an admin session and back in as a zone-restricted
-  // viewer would briefly render the admin's cached agents, events, and alerts — data
-  // the hub would never have sent to that viewer. The cache is per-credential state and
-  // must not survive one.
-  useEffect(() => {
-    if (previousCredential.current !== credential) {
-      previousCredential.current = credential;
-      queryClient.clear();
-    }
-  }, [credential, queryClient]);
+  // Note: nothing clears the query cache here on purpose. An earlier version called
+  // queryClient.clear() from an effect on credential change, which could leave this
+  // very query observer with no query AND no fetch in flight — the screen below then
+  // sat on "Checking credential…" forever. Query keys carry the session generation
+  // instead, so the previous identity's data is unreachable rather than deleted.
 
   // A stored credential the hub no longer accepts (rotated, or the hub reconfigured)
   // must not leave the app stuck on a spinner.

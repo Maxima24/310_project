@@ -6,6 +6,7 @@ import { ScheduleModule } from '@nestjs/schedule';
 import { AgentsModule } from './agents/agents.module';
 import { AlertsModule } from './alerts/alerts.module';
 import { AuthModule } from './auth/auth.module';
+import { CamerasModule } from './cameras/cameras.module';
 import { AuthGuard } from './common/guards/auth.guard';
 import { PrismaModule } from './common/prisma/prisma.module';
 import { SecurityModule } from './common/security/security.module';
@@ -36,6 +37,7 @@ import { SystemModule } from './system/system.module';
     AlertsModule,
     AgentsModule,
     EventsModule,
+    CamerasModule,
     MqttModule,
   ],
   controllers: [HealthController],

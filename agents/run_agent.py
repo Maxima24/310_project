@@ -202,6 +202,27 @@ def build_parser() -> argparse.ArgumentParser:
         help="MQTT broker port (env MQTT_PORT, default 1883).",
     )
 
+    live = parser.add_argument_group("live view (camera)")
+    live.add_argument(
+        "--stream",
+        action="store_true",
+        help="Publish frames for the dashboard's live view. Needs --real. Off by default: "
+        "an always-on feed costs bandwidth whether or not anyone is watching.",
+    )
+    live.add_argument(
+        "--stream-fps",
+        type=positive_float,
+        default=5.0,
+        help="Frames per second for the live view (default 5). Detection still runs at the "
+        "full poll rate; this only throttles what a human sees.",
+    )
+    live.add_argument(
+        "--stream-width",
+        type=int,
+        default=640,
+        help="Downscale frames to this width before sending (default 640).",
+    )
+
     creds = parser.add_argument_group("credentials")
     creds.add_argument(
         "--token-dir",
@@ -314,6 +335,10 @@ def build_agent(args: argparse.Namespace, transport: Transport) -> BaseAgent:
         cooldown=args.cooldown if args.cooldown is not None else 10.0,
         recorder=recorder,
         uploader=uploader,
+        # There is nothing to stream in simulation mode — no frames exist — so the flag
+        # is quietly inert rather than producing a camera that claims to be streaming.
+        stream_fps=args.stream_fps if (args.stream and args.real) else 0.0,
+        stream_width=args.stream_width,
         # A camera polls faster than a PIR: frames are the unit of work, and the
         # cooldown (not the poll rate) is what limits reporting.
         poll_interval=args.interval if args.interval != 1.0 else 0.2,
@@ -368,6 +393,13 @@ def main(argv: list[str] | None = None) -> int:
             return EXIT_BAD_ARGS
     else:
         transport = HttpTransport(args.hub, bootstrap_key, token_store=token_store)
+
+    if args.stream and not args.real:
+        print(
+            "--stream needs --real: simulation mode produces no frames, so there would be "
+            "nothing to show. Continuing without the live view.",
+            file=sys.stderr,
+        )
 
     if args.heartbeat_interval >= 30.0:
         # The hub's default HEARTBEAT_TIMEOUT_MS is 30s, so beating this slowly gets

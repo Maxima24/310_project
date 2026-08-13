@@ -4,6 +4,25 @@ import { api } from '../lib/api';
 import { useSessionStore } from '../stores/session.store';
 
 /**
+ * Tidies a pasted credential.
+ *
+ * Keys get copied out of documentation and chat, which reliably picks up the
+ * punctuation around them — a trailing full stop after a code span, or wrapping
+ * backticks and quotes. The hub then rejects a key that looks correct to the eye, and
+ * the redacted value in its log is the only clue. Since none of these characters can
+ * appear in a real credential, stripping them removes a whole class of confusing
+ * failure without ever mangling a valid key.
+ */
+function cleanCredential(raw: string): string {
+  return raw
+    .trim()
+    .replace(/^[`'"<]+/, '')
+    .replace(/[`'">]+$/, '')
+    .replace(/[.,;:]+$/, '')
+    .trim();
+}
+
+/**
  * Collects a credential and verifies it before accepting it.
  *
  * Verifying up front means a typo fails here with one clear message, rather than as a
@@ -23,7 +42,7 @@ export function SignIn() {
 
     // Store first so the request layer picks it up, then roll back on rejection —
     // leaving a known-bad credential in the store would break every later request.
-    signIn(value.trim());
+    signIn(cleanCredential(value));
     try {
       await api.me();
     } catch (err) {

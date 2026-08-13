@@ -59,6 +59,8 @@ class CameraAgent(BaseAgent):
         seed: int | None = None,
         recorder: EvidenceRecorder | None = None,
         uploader: ClipUploader | None = None,
+        stream_fps: float = 0.0,
+        stream_width: int = 640,
     ) -> None:
         super().__init__(
             agent_id,
@@ -85,6 +87,15 @@ class CameraAgent(BaseAgent):
         self._reopen_attempts = 0
         self._recorder = recorder
         self._uploader = uploader
+        #: Live view. Off unless --stream: an always-on feed costs bandwidth on every
+        #: camera whether or not anyone is watching.
+        self._stream_fps = stream_fps
+        self._stream_width = stream_width
+        self._stream_interval = 1.0 / stream_fps if stream_fps > 0 else 0.0
+        self._last_frame_sent = 0.0
+        self._stream_failures = 0
+        if stream_fps > 0:
+            self.capabilities = [*self.capabilities, "stream"]
         #: Lower bound on when a clip can exist: the post-roll must finish recording
         #: first. Published so a consumer knows how long to wait before retrying.
         self._post_roll_ms = recorder.post_roll_ms if recorder is not None else 0
@@ -225,6 +236,8 @@ class CameraAgent(BaseAgent):
         if self._recorder is not None:
             self._recorder.observe(frame)
 
+        self._maybe_stream(frame)
+
         mask = self._subtractor.apply(frame)
 
         if self._frame_index <= WARMUP_FRAMES:
@@ -250,6 +263,50 @@ class CameraAgent(BaseAgent):
             # Clip references are added by _start_evidence_clip (roadmap item 5) —
             # metadata is free-form precisely so that needed no migration.
         }
+
+    def _maybe_stream(self, frame: Any) -> None:
+        """Publishes a downscaled JPEG for the live view, rate-limited.
+
+        Throttled independently of the poll interval: detection wants every frame it
+        can get, a human watching does not — 5fps looks live and costs a fraction of
+        the bandwidth. Encoding is skipped entirely between ticks, so the cost when
+        nobody enabled streaming is one float comparison per frame.
+
+        Failures are counted and logged sparsely rather than raised. A live view is a
+        convenience; losing it must never interrupt detection, which is the job that
+        matters.
+        """
+        if self._stream_interval <= 0:
+            return
+
+        now = time.monotonic()
+        if now - self._last_frame_sent < self._stream_interval:
+            return
+        self._last_frame_sent = now
+
+        try:
+            cv2 = self._cv2
+            height, width = frame.shape[:2]
+            if width > self._stream_width:
+                scale = self._stream_width / float(width)
+                frame = cv2.resize(
+                    frame, (self._stream_width, int(height * scale)), interpolation=cv2.INTER_AREA
+                )
+
+            ok, buffer = cv2.imencode(".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), 70])
+            if not ok:
+                return
+
+            self.transport.publish_frame(self.agent_id, buffer.tobytes())
+            self._stream_failures = 0
+        except Exception as exc:  # noqa: BLE001 - never let the view break detection
+            self._stream_failures += 1
+            # Log the first failure and then every 50th, so a hub outage does not fill
+            # the log with one line per frame.
+            if self._stream_failures == 1 or self._stream_failures % 50 == 0:
+                log.warning(
+                    "Live frame publish failed (%s consecutive): %s", self._stream_failures, exc
+                )
 
     def _reopen(self) -> None:
         """Tears the stream down and reopens it, giving up after a few attempts.
