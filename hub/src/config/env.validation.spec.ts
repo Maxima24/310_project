@@ -80,8 +80,37 @@ describe('validateEnv', () => {
     // Reusing one secret collapses the roles back into a shared key and hands every
     // agent host operator privileges — the exact thing roadmap 2 removes.
     expect(() =>
-      validateEnv({ ...VALID, AGENT_BOOTSTRAP_KEY: 'same-secret-value', OPERATOR_KEY: 'same-secret-value' }),
-    ).toThrow(/must differ/i);
+      validateEnv({
+        ...VALID,
+        AGENT_BOOTSTRAP_KEY: 'same-secret-value',
+        OPERATOR_KEY: 'same-secret-value',
+      }),
+    ).toThrow(/same value/i);
+  });
+
+  it('refuses a viewer key equal to the admin key', () => {
+    // Otherwise the read-only role silently becomes a full override.
+    expect(() =>
+      validateEnv({ ...VALID, VIEWER_KEY: 'shared-secret-x', ADMIN_KEY: 'shared-secret-x' }),
+    ).toThrow(/same value/i);
+  });
+
+  it('accepts a config with no viewer or admin role at all', () => {
+    // Both are optional; leaving them unset simply means those roles do not exist.
+    const env = validateEnv({ ...VALID });
+
+    expect(env.VIEWER_KEY).toBeUndefined();
+    expect(env.ADMIN_KEY).toBeUndefined();
+  });
+
+  it('parses viewer zones into a trimmed list', () => {
+    const env = validateEnv({ ...VALID, VIEWER_ZONES: ' Hallway , Lobby ,, ' });
+
+    expect(env.VIEWER_ZONES).toBe(' Hallway , Lobby ,, ');
+  });
+
+  it('rejects a viewer key that is too short to be safe', () => {
+    expect(() => validateEnv({ ...VALID, VIEWER_KEY: 'short' })).toThrow(/at least 8/i);
   });
 
   it('refuses a heartbeat timeout that is not longer than the interval', () => {

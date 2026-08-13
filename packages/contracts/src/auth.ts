@@ -1,20 +1,123 @@
 /**
- * Credential roles (roadmap item 2).
+ * Authorization model: roles, permissions, and the attributes policies read.
  *
- * The shared `x-agent-key` this replaced let any key holder do anything: forge an
- * event as any sensor, disarm the system, acknowledge alerts. Splitting the
- * credentials means a compromised sensor can only ever speak for itself.
+ * Shared so the hub and the dashboard cannot disagree about what a role may do. The
+ * hub remains authoritative — the dashboard also *receives* its effective permissions
+ * from `GET /auth/me` rather than deriving them, so a policy change on the server
+ * takes effect in the UI without a redeploy, and a stale client cannot grant itself
+ * anything.
  */
+
+/** Who is calling. */
 export const AuthRole = {
   /** Provisioning secret. Enrollment only — `POST /agents/register`, nothing else. */
   Bootstrap: 'bootstrap',
   /** A per-agent token. Scoped to one agent id: its own heartbeats and its own events. */
   Agent: 'agent',
-  /** Dashboards and humans: read history, arm/disarm, acknowledge alerts. */
+  /** Read-only human. Can be restricted to specific zones. */
+  Viewer: 'viewer',
+  /** Day-to-day operator: acknowledge alerts, arm and disarm. */
   Operator: 'operator',
+  /** Everything an operator can do, plus overrides and the delivery audit. */
+  Admin: 'admin',
 } as const;
 
 export type AuthRole = (typeof AuthRole)[keyof typeof AuthRole];
+
+/**
+ * Individual capabilities. Routes are guarded on these rather than on roles, so
+ * changing what a role may do never means editing a controller.
+ */
+export const Permission = {
+  AgentsRead: 'agents:read',
+  EventsRead: 'events:read',
+  AlertsRead: 'alerts:read',
+  AlertsAck: 'alerts:ack',
+  SystemModeRead: 'system:mode:read',
+  /** disarmed/home -> away, or disarmed -> home. Raising protection. */
+  SystemArm: 'system:arm',
+  /** Anything -> disarmed. Lowering protection, so it is separately gated. */
+  SystemDisarm: 'system:disarm',
+  /** The notification delivery audit: was anyone actually told? */
+  NotificationsRead: 'notifications:read',
+  /** Enrolling an agent. */
+  AgentsEnroll: 'agents:enroll',
+  /** An agent reporting its own event. */
+  EventsWrite: 'events:write',
+  /** An agent proving liveness. */
+  AgentsHeartbeat: 'agents:heartbeat',
+} as const;
+
+export type Permission = (typeof Permission)[keyof typeof Permission];
+
+const VIEWER_PERMISSIONS: Permission[] = [
+  Permission.AgentsRead,
+  Permission.EventsRead,
+  Permission.AlertsRead,
+  Permission.SystemModeRead,
+];
+
+const OPERATOR_PERMISSIONS: Permission[] = [
+  ...VIEWER_PERMISSIONS,
+  Permission.AlertsAck,
+  Permission.SystemArm,
+  Permission.SystemDisarm,
+];
+
+/**
+ * Role -> permissions (the RBAC half).
+ *
+ * Note that `operator` holds SystemDisarm: the restriction on disarming during an
+ * active critical alert is attribute-based, not role-based, so it lives in the policy
+ * layer rather than here. Roles answer "what may this kind of user do?"; policies
+ * answer "may they do it right now, to this thing?".
+ */
+export const ROLE_PERMISSIONS: Record<AuthRole, readonly Permission[]> = {
+  [AuthRole.Bootstrap]: [Permission.AgentsEnroll],
+  [AuthRole.Agent]: [Permission.EventsWrite, Permission.AgentsHeartbeat],
+  [AuthRole.Viewer]: VIEWER_PERMISSIONS,
+  [AuthRole.Operator]: OPERATOR_PERMISSIONS,
+  [AuthRole.Admin]: [...OPERATOR_PERMISSIONS, Permission.NotificationsRead],
+};
+
+export function permissionsForRole(role: AuthRole): readonly Permission[] {
+  return ROLE_PERMISSIONS[role] ?? [];
+}
+
+/** Actions a policy can be asked about, beyond a plain permission check. */
+export const PolicyAction = {
+  SetMode: 'system:setMode',
+  AcknowledgeAlert: 'alerts:acknowledge',
+  ReadAgent: 'agents:readOne',
+} as const;
+
+export type PolicyAction = (typeof PolicyAction)[keyof typeof PolicyAction];
+
+/** Why a policy refused, so the UI can explain rather than just disable a button. */
+export interface PolicyDecision {
+  allowed: boolean;
+  /** Human-readable, shown directly to an operator. Absent when allowed. */
+  reason?: string;
+  /** Which role could perform it instead, when the block is role-based. */
+  requiresRole?: AuthRole;
+}
+
+/**
+ * `GET /auth/me`. The dashboard renders from this instead of hardcoding a role table,
+ * so the server stays the single source of truth.
+ */
+export interface IdentityResponse {
+  role: AuthRole;
+  permissions: Permission[];
+  /**
+   * Agent locations this credential may see. Empty means unrestricted — the
+   * attribute-based half of the model: two viewers with the same role can see
+   * different data.
+   */
+  zones: string[];
+  /** Present only for an agent token. */
+  agentId?: string;
+}
 
 /** Every credential travels as `Authorization: Bearer <credential>`. */
 export const AUTH_HEADER = 'authorization';
@@ -37,4 +140,18 @@ export interface EnrollmentResponse {
    * holding the bootstrap key would do.
    */
   rotated: boolean;
+}
+
+/** True when the role's permission set contains `permission`. */
+export function roleHas(role: AuthRole, permission: Permission): boolean {
+  return permissionsForRole(role).includes(permission);
+}
+
+/**
+ * True when a zone-restricted credential may see a given agent location.
+ * An empty `zones` list means unrestricted.
+ */
+export function zoneAllows(zones: readonly string[], location: string): boolean {
+  if (zones.length === 0) return true;
+  return zones.some((zone) => zone.toLowerCase() === location.toLowerCase());
 }

@@ -10,6 +10,7 @@ import type { Alert, Prisma } from '@prisma/client';
 
 import { NotificationsService } from '../notifications/notifications.service';
 import { PrismaService } from '../common/prisma/prisma.service';
+import type { Identity } from '../common/security/credential.service';
 import { RealtimeGateway } from '../realtime/realtime.gateway';
 import { SystemService } from '../system/system.service';
 import { evaluate, offlineOutcome, recoveredOutcome, type RuleAgent, type RuleOutcome } from './alert-rules';
@@ -51,13 +52,16 @@ export class AlertsService {
     const outcome = evaluate({ eventType, mode, agent });
     if (!outcome) return null;
 
-    return this.raise(outcome, mode, { agentId: agent.id, eventId });
+    return this.raise(outcome, mode, { agentId: agent.id, eventId, location: agent.location });
   }
 
   /** Called by the liveness sweep for each agent that went silent. */
   async raiseAgentOffline(agent: RuleAgent, silentForMs: number): Promise<AlertView | null> {
     const { mode } = await this.system.getMode();
-    return this.raise(offlineOutcome(agent, mode, silentForMs), mode, { agentId: agent.id });
+    return this.raise(offlineOutcome(agent, mode, silentForMs), mode, {
+      agentId: agent.id,
+      location: agent.location,
+    });
   }
 
   /** Called when a previously-offline agent reports in again. */
@@ -66,7 +70,12 @@ export class AlertsService {
     // Bypasses the cooldown: a recovery notice is the counterpart to a specific
     // offline alert, and suppressing it would leave a dashboard showing an agent
     // as offline with no event explaining the change.
-    return this.raise(recoveredOutcome(agent), mode, { agentId: agent.id }, { skipCooldown: true });
+    return this.raise(
+      recoveredOutcome(agent),
+      mode,
+      { agentId: agent.id, location: agent.location },
+      { skipCooldown: true },
+    );
   }
 
   /**
@@ -78,7 +87,7 @@ export class AlertsService {
   private async raise(
     outcome: RuleOutcome,
     mode: SystemMode,
-    links: { agentId?: string; eventId?: string },
+    links: { agentId?: string; eventId?: string; location?: string },
     options: { skipCooldown?: boolean } = {},
   ): Promise<AlertView | null> {
     if (!options.skipCooldown && (await this.isSuppressed(outcome.type, links.agentId))) {
@@ -101,7 +110,7 @@ export class AlertsService {
 
     const view = toAlertView(alert);
     this.logger.warn(`ALERT [${view.severity}] ${view.type}: ${view.message}`);
-    this.realtime.emitAlert(view);
+    this.realtime.emitAlert(view, links.location);
     this.notify(view);
 
     return view;
@@ -132,13 +141,20 @@ export class AlertsService {
     return existing !== null;
   }
 
-  async findMany(query: QueryAlertsRequest): Promise<AlertView[]> {
+  async findMany(query: QueryAlertsRequest, identity?: Identity): Promise<AlertView[]> {
     const limit = Math.min(query.limit ?? this.defaultLimit, this.maxLimit);
 
     const where: Prisma.AlertWhereInput = {};
     if (query.acknowledged !== undefined) where.acknowledged = query.acknowledged;
     if (query.type) where.type = query.type;
     if (query.agentId) where.agentId = query.agentId;
+
+    // Zone scoping through the agent relation. Note this also hides system-level
+    // alerts with no agent from a zone-restricted caller, which is the conservative
+    // reading: an alert that cannot be attributed to their zone is not theirs.
+    if (identity?.zones.length) {
+      where.agent = { location: { in: identity.zones, mode: 'insensitive' } };
+    }
 
     const alerts = await this.prisma.alert.findMany({
       where,

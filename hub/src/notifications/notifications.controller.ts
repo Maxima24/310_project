@@ -1,16 +1,16 @@
 import type { NotificationView } from '@cpe310/contracts';
 import { Controller, Get, Param, Query } from '@nestjs/common';
 
-import { OperatorOnly } from '../common/guards/roles.decorator';
+import { CanReadNotifications } from '../common/guards/permissions.decorator';
 import { NotificationsService } from './notifications.service';
 
 /**
- * Delivery audit. Operator-only: it answers "was anyone actually told, and did it
- * work?", which is exactly the question after an incident — and not something a
- * sensor has any business asking.
+ * Delivery audit. Admin-only: it answers "was anyone actually told, and did it work?",
+ * and it exposes recipient addresses and webhook errors — more than a day-to-day
+ * operator needs, and certainly more than a sensor.
  */
 @Controller('notifications')
-@OperatorOnly()
+@CanReadNotifications()
 export class NotificationsController {
   constructor(private readonly notifications: NotificationsService) {}
 

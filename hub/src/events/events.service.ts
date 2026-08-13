@@ -12,6 +12,7 @@ import type { Event, Prisma } from '@prisma/client';
 import { AgentsService } from '../agents/agents.service';
 import { AlertsService } from '../alerts/alerts.service';
 import { PrismaService } from '../common/prisma/prisma.service';
+import type { Identity } from '../common/security/credential.service';
 import { RealtimeGateway } from '../realtime/realtime.gateway';
 
 /** Agent-vs-hub clock difference that is worth telling the operator about. */
@@ -82,7 +83,9 @@ export class EventsService {
 
     const view = toEventView(created);
     this.logger.debug(`Event ${view.type} from ${view.agentId}`);
-    this.realtime.emitEvent(view);
+    // Location drives zone fan-out on the socket, so a zone-restricted viewer sees
+    // only its own wing here just as it does over REST.
+    this.realtime.emitEvent(view, agent.location);
 
     const alert = await this.alerts.evaluateEvent(
       { id: agent.id, type: agent.type, location: agent.location },
@@ -114,13 +117,20 @@ export class EventsService {
     }
   }
 
-  async findMany(query: QueryEventsRequest): Promise<EventView[]> {
+  async findMany(query: QueryEventsRequest, identity?: Identity): Promise<EventView[]> {
     const limit = Math.min(query.limit ?? this.defaultLimit, this.maxLimit);
 
     const where: Prisma.EventWhereInput = {};
     if (query.agentId) where.agentId = query.agentId;
     if (query.type) where.type = query.type;
     if (query.since) where.createdAt = { gt: new Date(query.since) };
+
+    // Zone scoping via the agent relation, applied in the query so out-of-zone events
+    // never reach the response. A caller cannot widen this with ?agentId= either,
+    // because both conditions must hold.
+    if (identity?.zones.length) {
+      where.agent = { location: { in: identity.zones, mode: 'insensitive' } };
+    }
 
     const events = await this.prisma.event.findMany({
       where,

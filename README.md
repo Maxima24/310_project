@@ -1,176 +1,208 @@
 # Multi-agent physical security system
 
 Distributed Python collector agents (cameras, door sensors, motion sensors) reporting to a central
-NestJS hub that tracks agent health, evaluates alert rules, and streams live updates to dashboards
-over WebSocket.
+NestJS hub that tracks agent health, evaluates alert rules, streams live updates over WebSocket, and
+fans notifications out to humans. A React dashboard renders it.
 
 The design separates **collection** from **decision-making**: agents own hardware I/O and know nothing
-about alert policy, and the hub owns the agent registry, the rules, the arm state, and the live feed.
-Two properties follow from that split:
+about alert policy; the hub owns the registry, the rules, the arm state, and the live feed. Two
+properties follow:
 
 1. **A silent sensor is a security event.** An agent that stops heartbeating is treated as possible
    tamper, not a harmless disconnect — the hub raises `agent_offline` within ~30s.
 2. **Alert policy depends on arm mode.** Motion at 3pm while `disarmed` is noise; the same motion in
-   `away` is an intrusion. Rules are evaluated centrally, so changing policy never means redeploying
-   a sensor.
+   `away` is an intrusion. Rules are evaluated centrally, so changing policy never means redeploying a
+   sensor.
 
 ## Layout
 
 ```
-hub/                 NestJS hub (agent registry, event ingestion, alert engine, WebSocket feed)
+hub/                 NestJS hub — registry, ingestion, alert engine, auth, notifications, WebSocket
 agents/              Python collector agents (motion, door, camera)
-packages/contracts/  Wire types shared by the hub and any client — source of truth
+dashboard/           React + Vite operator dashboard
+packages/contracts/  Wire types, permissions, and role map shared by all three — source of truth
 packages/tsconfig/   Shared TypeScript base config
-tools/ws-client.mjs  Socket.io observer for watching the live feed
+tools/ws-client.mjs  Socket.io observer for watching the live feed from a terminal
 ```
 
-A pnpm + Turborepo monorepo. `hub` and `packages/*` are workspaces; the Python agents live alongside
-with their own `requirements.txt`.
+A pnpm + Turborepo monorepo. `hub`, `dashboard`, and `packages/*` are workspaces; the Python agents
+live alongside with their own `requirements.txt`.
 
 ---
 
-## Quick start (Docker — everything at once)
-
-Brings up Postgres, the hub, and three simulated agents. No hardware needed.
+## Quick start
 
 ```bash
-cp .env.example .env        # set a real AGENT_API_KEY
+cp .env.example .env        # set real secrets
 docker compose up --build
 ```
 
-Then jump to [Verify it end to end](#verify-it-end-to-end).
+That brings up Postgres, Mosquitto (MQTT), Mailpit (SMTP), MinIO (evidence storage), the hub, and three
+simulated agents — one of which reports over MQTT rather than HTTP.
 
-## Quick start (native)
+| Service | URL |
+|---|---|
+| Hub API + WebSocket | http://localhost:3000 |
+| Mailpit inbox (alert emails) | http://localhost:8025 |
+| MinIO console (video evidence) | http://localhost:9001 — `minioadmin` / `minioadmin` |
+| Postgres | localhost:**5433** (not 5432 — see below) |
 
-**1. Install and start the hub**
+Then start the dashboard:
 
 ```bash
-pnpm install                # at the REPO ROOT — this is a workspace, not per-package
+pnpm install                # at the REPO ROOT — this is a workspace
+pnpm --filter dashboard dev # http://localhost:5173
+```
+
+Sign in with `OPERATOR_KEY` from your `.env`.
+
+> Postgres is published on **5433**, not 5432, because a locally-installed Postgres usually already owns
+> 5432 and pointing the hub at the wrong server surfaces as a confusing authentication failure.
+> Containers reach it as `postgres:5432` internally either way.
+
+### Running natively instead
+
+```bash
+docker compose up -d postgres mosquitto mailpit minio
 cp hub/.env.example hub/.env
+pnpm db:migrate && pnpm db:seed
+pnpm dev                    # hub on :3000
 ```
-
-Postgres must be reachable at the `DATABASE_URL` in `hub/.env`. The easiest way is to run just the
-database in Docker:
-
-```bash
-docker compose up -d postgres
-```
-
-Then create the schema and start the hub:
-
-```bash
-pnpm db:migrate             # creates tables
-pnpm db:seed                # optional — inserts the initial SystemState row
-pnpm dev                    # hub on http://localhost:3000
-```
-
-**2. Start one or more agents** (simulation mode works on any machine)
 
 ```powershell
-# PowerShell
+# PowerShell — agents get the enrollment secret only
 cd agents
 pip install -r requirements.txt
-$env:AGENT_API_KEY = "dev-key-change-me"   # must match the hub's
+$env:AGENT_BOOTSTRAP_KEY = "dev-bootstrap-key-change-me"
 
 python run_agent.py --type motion --id motion-hallway --location "Hallway"
-python run_agent.py --type door   --id door-front     --location "Front door"
+python run_agent.py --type door   --id door-front     --location "Front door" --transport mqtt
 ```
 
 ```bash
 # bash / zsh
-cd agents
-pip install -r requirements.txt
-export AGENT_API_KEY=dev-key-change-me
-
-python run_agent.py --type motion --id motion-hallway --location "Hallway"
-python run_agent.py --type door   --id door-front     --location "Front door"
+export AGENT_BOOTSTRAP_KEY=dev-bootstrap-key-change-me
 ```
+
+---
+
+## Roles and permissions
+
+Credentials are split by role and all travel as `Authorization: Bearer <credential>`. **Every rule below
+is enforced by the hub**, not merely reflected in the UI — the dashboard hides what the API would refuse,
+but refusing is the API's job.
+
+| Credential | Role | May |
+|---|---|---|
+| `AGENT_BOOTSTRAP_KEY` | `bootstrap` | Enroll an agent. **Nothing else.** |
+| *(issued at enrollment)* | `agent` | Heartbeat and report events **as itself only** |
+| `VIEWER_KEY` | `viewer` | Read agents, events, alerts, arm state |
+| `OPERATOR_KEY` | `operator` | Viewer + acknowledge alerts + arm/disarm |
+| `ADMIN_KEY` | `admin` | Operator + notification audit + policy overrides |
+
+`VIEWER_KEY` and `ADMIN_KEY` are optional — leave one unset and that role does not exist. All configured
+credentials must be **distinct**; a duplicate silently collapses two roles into one, so the hub refuses
+to start.
+
+Routes are guarded on **permissions**, not roles, so changing what a role may do never means editing a
+controller. The mapping lives once, in [packages/contracts/src/auth.ts](packages/contracts/src/auth.ts).
+A route that declares no permissions is **denied to everyone** — forgetting the decorator fails closed.
+
+`GET /auth/me` returns the caller's role, permissions, and zones. The dashboard renders from that rather
+than a hardcoded table, so a policy change on the hub takes effect in the browser with no redeploy.
+
+### Attribute-based rules (ABAC)
+
+Roles answer *what may this kind of user do?* Policies answer *may they do it right now, to this thing?*
+Two rules go beyond roles:
+
+**Disarming during an active incident requires an admin.** An operator cannot disarm while a critical
+alert is unacknowledged. The failure mode this prevents is real: an alarm is sounding and the fastest way
+to make it stop is to disarm rather than investigate — which is exactly what an intruder at the panel
+would do. Acknowledging first is the intended path, and it unlocks disarming. Arming is *never* blocked;
+refusing to let someone increase protection during an incident would be the wrong default.
+
+**Zone-scoped credentials.** `VIEWER_ZONES=Hallway,Lobby` limits a credential to those agent locations.
+Filtering happens in the database queries **and** in the WebSocket fan-out (via socket.io rooms) — without
+the latter, a zone-restricted viewer would be filtered out of `GET /events` yet still receive every event
+in the building over the socket, making the REST filtering decorative. A zoned caller also cannot widen
+its scope with `?agentId=`, and cannot acknowledge alerts from another zone.
+
+Refusals carry a human-readable reason and the role that could perform the action, so the dashboard can
+explain rather than show a bare 403.
+
+---
+
+## Dashboard
+
+React + Vite, in the monorepo so it shares `@cpe310/contracts` with the hub — a renamed WebSocket channel
+or permission is a compile error, not a silently dead panel.
+
+- **TanStack Query owns all server state.** The WebSocket writes into the *same* cache the REST queries
+  populate, so there is one copy of each entity and no panel can disagree with a refetch.
+- **Zustand holds only client state** — the session credential and view preferences. No server data.
+- **Authorization comes from `/auth/me`.** Controls are gated on the returned permissions; the mode
+  buttons additionally evaluate the disarm policy up front so the padlock carries the reason.
+- Acknowledgement is optimistic (it only dims a row, and rolls back on failure). **Arm changes are not** —
+  briefly showing a security panel as disarmed when it is not would be a dangerous lie.
+- The cache is cleared whenever the credential changes, so signing in as a viewer never shows the previous
+  admin session's data.
 
 ---
 
 ## Verify it end to end
 
-`curl` in PowerShell 5.1 is an alias for `Invoke-WebRequest`, so use `curl.exe` or the
-`Invoke-RestMethod` forms below.
-
 ```powershell
-$H = @{ 'x-agent-key' = 'dev-key-change-me'; 'Content-Type' = 'application/json' }
+$H = @{ 'Authorization' = 'Bearer dev-operator-key-change-me'; 'Content-Type' = 'application/json' }
 $B = 'http://localhost:3000'
 
-# Agents registered and online
-Invoke-RestMethod "$B/agents" -Headers $H | Format-Table id, type, status, secondsSinceLastSeen
-
-# Auth is enforced — expect 401
-try { Invoke-RestMethod "$B/agents" } catch { $_.Exception.Response.StatusCode.value__ }
-
-# Arm the system
+Invoke-RestMethod "$B/auth/me"  -Headers $H          # who am I, and what may I do?
+Invoke-RestMethod "$B/agents"   -Headers $H | Format-Table id, type, status, secondsSinceLastSeen
 Invoke-RestMethod "$B/system/mode" -Method Post -Headers $H -Body '{"mode":"away"}'
-
-# Trip a sensor -> critical alert
-Invoke-RestMethod "$B/events" -Method Post -Headers $H -Body (@{
-  agentId  = 'motion-hallway'
-  type     = 'motion_detected'
-  occurredAt = (Get-Date).ToUniversalTime().ToString('o')
-  metadata = @{ source = 'manual-test' }
-} | ConvertTo-Json)
-
-Invoke-RestMethod "$B/alerts" -Headers $H | Format-Table type, severity, acknowledged, message
-
-# Acknowledge the newest alert
-$id = (Invoke-RestMethod "$B/alerts" -Headers $H)[0].id
-Invoke-RestMethod "$B/alerts/$id/ack" -Method Post -Headers $H
+Invoke-RestMethod "$B/alerts"   -Headers $H | Format-Table type, severity, acknowledged, message
 
 # Tamper detection: kill an agent, expect agent_offline within ~30s
-docker compose stop agent-door        # or Ctrl-C a native agent
+docker compose stop agent-door
 Start-Sleep -Seconds 40
 Invoke-RestMethod "$B/alerts" -Headers $H | Where-Object type -eq 'agent_offline'
-
-# Recovery auto-acknowledges that alert and posts agent_recovered
-docker compose start agent-door
-Start-Sleep -Seconds 15
-Invoke-RestMethod "$B/agents" -Headers $H | Where-Object id -eq 'door-front'
+docker compose start agent-door        # recovery auto-acknowledges it
 ```
 
-**Watch the live feed** while doing the above — this is also the only way to exercise the WebSocket
-auth path, which the HTTP guard does not cover:
+Watch the feed from a terminal while doing the above:
 
 ```bash
-node tools/ws-client.mjs --key dev-key-change-me
+node tools/ws-client.mjs --key dev-operator-key-change-me
 ```
 
-A wrong `--key` is disconnected at handshake and exits 1.
+A credential without `alerts:read` is disconnected at handshake — the one auth path the REST guard does
+not cover.
 
-**Inspect the database:**
+**Notifications:** a critical alert produces a real email in Mailpit at http://localhost:8025. Set
+`ALERT_WEBHOOK_URL` to also POST the alert JSON anywhere. Delivery attempts are recorded, so
+`GET /notifications` (admin) answers *was anyone actually told?*
 
-```bash
-docker compose exec postgres psql -U postgres -d security \
-  -c 'select type, severity, acknowledged from "Alert" order by "createdAt" desc limit 10;'
-```
-
-Or `pnpm db:studio` for a browser UI.
+**Video evidence:** run a camera with `--record-evidence` and clips land in MinIO, referenced from the
+event's `metadata.clip_url`.
 
 ## Tests
 
 ```bash
-pnpm test                   # 76 hub tests
-cd agents && pytest         # 44 agent tests
+pnpm test                   # 200 hub tests
+cd agents && pytest         # 64 agent tests
+pnpm --filter dashboard build   # dashboard typecheck + build
 ```
 
-Hub coverage: the full mode × event rule matrix, dedup/cooldown, the liveness sweep (including the
-startup grace period and re-entrancy), registry recovery paths, event ingest ordering and pagination
-clamping, and boot-time env validation. Agent coverage: wire-format shapes, door edge detection, camera
-cooldown and reconnect give-up, transport buffering/retry/re-registration, and CLI guards.
+Hub coverage includes the full mode × event alert matrix, dedup/cooldown, the liveness sweep (startup
+grace, re-entrancy, post-crash reconciliation), the role × permission matrix, the ABAC policies, token
+minting, event ingest ordering, and boot-time env validation. Prisma is mocked, so no database is needed.
 
-The hub tests mock Prisma, so no database is needed. The agent tests assert against literal wire
-strings — they are the drift detector between `packages/contracts` and `security_agent/contracts.py`.
+Agent coverage includes wire-format shapes (the drift detector against `packages/contracts`), door edge
+detection, camera cooldown and stream-reconnect give-up, transport buffering/retry/re-enrollment, evidence
+pre-roll and upload-failure handling, and CLI guards.
 
 ---
 
 ## Alert rules
-
-Evaluated centrally, as a function of arm mode. `home` suppresses interior motion (occupants are
-expected to move) but still guards doors — that asymmetry is the whole reason `home` exists as a
-separate mode from `disarmed`.
 
 | Event | `disarmed` | `home` | `away` |
 |---|---|---|---|
@@ -180,83 +212,46 @@ separate mode from `disarmed`.
 | `camera_motion` | — | — | `camera_motion` / warning |
 | `agent_offline` | `agent_offline` / warning | `agent_offline` / **critical** | `agent_offline` / **critical** |
 
-`agent_offline` fires in **every** mode including `disarmed` — a silent sensor is possible tamper, and
-only the severity tracks arm state.
+`home` suppresses interior motion (occupants are expected to move) but still guards doors — that
+asymmetry is the whole reason `home` exists. `agent_offline` fires in **every** mode including
+`disarmed`; only the severity escalates.
 
-**Two independent rate limits**, both needed:
-
-- **Agent-side cooldown** keeps a chattering sensor from flooding the network with events.
-- **Hub-side dedup** (`ALERT_COOLDOWN_MS`, default 60s, per `(alert type, agent)`) keeps a legitimately
-  busy sensor from flooding a human with alerts. Acknowledged alerts never suppress — once a human has
-  cleared one, the next trip is real news.
-
-The event log therefore still shows sustained activity even when only one alert fired.
+**Two independent rate limits**, both needed: an agent-side cooldown keeps a chattering sensor off the
+network, and a hub-side per-`(type, agent)` dedup (`ALERT_COOLDOWN_MS`, default 60s) keeps a busy sensor
+from flooding a human. Acknowledged alerts never suppress — once a human has cleared one, the next trip
+is real news. The event log still shows sustained activity even when one alert fired.
 
 ### Liveness timing
 
-Agents heartbeat every `HEARTBEAT_INTERVAL_MS` (10s). An agent is declared offline after
-`HEARTBEAT_TIMEOUT_MS` (30s — three missed beats) of silence, detected by a sweep on
-`LIVENESS_SWEEP_CRON` (every 5s). Worst-case detection is therefore **35s**, typically ~32s; set
-`HEARTBEAT_TIMEOUT_MS=25000` for a hard 30s ceiling. The hub refuses to start if the timeout is not
-greater than the interval, which would sweep healthy agents offline between beats.
-
-An event counts as proof of life too, so a sensor busy reporting motion is never swept offline — and
-because activity funnels through one code path, an event from an agent marked offline clears its
-`agent_offline` alert exactly as a heartbeat would.
-
-**Startup grace period.** The sweep does nothing for the first `HEARTBEAT_TIMEOUT_MS` of hub uptime.
-Every agent's `lastSeenAt` is stale right after a hub restart, because the hub wasn't running to
-receive heartbeats — sweeping then would declare the whole healthy fleet tampered-with and clear it
-again seconds later. Waiting one timeout costs no detection latency, since a live agent beats well
-inside that window.
-
----
-
-## Failure handling
-
-Deliberate choices about what happens when things break, since "a security system that lies about its
-own health" is the failure that matters most.
-
-| Situation | Behavior | Why |
-|---|---|---|
-| Hub restarts while agents run | No alerts | Startup grace period (above) |
-| Agent's clock is badly wrong | Event **stored**, warning logged | Never drop a real intrusion report over a bad NTP setup; ordering uses hub time |
-| Hub unreachable when an agent reports | Event buffered locally (cap 500, oldest dropped), flushed in order on reconnect | A brief outage must not lose the event that mattered |
-| Hub's database is wiped | Agent gets 404, re-registers, retries | Fleet self-heals with nobody restarting anything |
-| Agent's heartbeat hits an unexpected error | Thread logs and keeps beating | A dead heartbeat thread would raise a tamper alert for a demonstrably live agent |
-| Sensor read throws | Logged, polling continues, backs off after 5 straight failures | A flaky sensor is a maintenance issue, not a reason to stop reporting liveness |
-| OpenCV missing / camera won't open | Agent exits with a fix-it message (code 3) | Retrying forever helps nobody and hides the problem |
-| Camera stream dies mid-run | Reconnects, then exits after 3 failed attempts | A blind camera reporting healthy heartbeats is worse than one that stops — exiting lets `agent_offline` tell the truth |
-| Liveness sweep overruns its interval | Next tick skipped | Prevents double-alerting on the same agent |
-| One agent fails to alert during a sweep | Remaining agents still processed | They're already marked offline and would otherwise never be reported |
-| Sweep hits a DB error | Logged, job survives, next tick retries | A transient blip must not silently disable tamper detection |
-
-**Input limits.** Request bodies are capped at 64 kB (`metadata` is free-form, and video evidence is a
-URL reference by design, not an inline payload). `?limit=` is clamped to `EVENTS_PAGE_MAX`. The hub
-refuses to boot on an `AGENT_API_KEY` under 8 characters, a `HEARTBEAT_TIMEOUT_MS` not greater than the
-interval, or the sample key with `NODE_ENV=production`.
+Agents heartbeat every 10s; an agent is offline after 30s of silence, detected by a sweep every 5s —
+worst case 35s. The sweep does nothing for the first 30s of hub uptime, because every `lastSeenAt` is
+stale right after a restart and sweeping then would declare the whole healthy fleet tampered-with. An
+event counts as proof of life too, and clears an `agent_offline` alert exactly as a heartbeat would.
 
 ---
 
 ## API summary
 
-All HTTP requests require `x-agent-key`. `GET /health` is the sole exception (Docker's healthcheck
-needs it) and returns 503 when Postgres is unreachable.
+All routes require `Authorization: Bearer <credential>` except `GET /health`.
 
-| Method | Path | Purpose |
-|---|---|---|
-| POST | `/agents/register` | Agent announces itself (idempotent — upserts) |
-| POST | `/agents/:id/heartbeat` | Keep-alive (every 10s); 404 if unregistered |
-| GET | `/agents` | List agents + status |
-| POST | `/events` | Ingest a sensor event; returns the alert it raised, if any |
-| GET | `/events` | Recent events (`?limit=&since=&agentId=&type=`) |
-| GET | `/alerts` | Recent alerts (`?limit=&acknowledged=&type=&agentId=`) |
-| POST | `/alerts/:id/ack` | Acknowledge an alert (idempotent) |
-| GET/POST | `/system/mode` | Get/set `disarmed` \| `home` \| `away` |
-| GET | `/health` | Liveness + DB reachability (public) |
+| Method | Path | Requires | Purpose |
+|---|---|---|---|
+| GET | `/auth/me` | any human role | Role, permissions, zones |
+| POST | `/agents/register` | bootstrap | Enroll; returns the agent's token **once** |
+| POST | `/agents/:id/heartbeat` | that agent | Keep-alive |
+| GET | `/agents` | `agents:read` | List agents + status |
+| POST | `/events` | that agent | Ingest a sensor event |
+| GET | `/events` | `events:read` | Recent events (`?limit=&since=&agentId=&type=`) |
+| GET | `/alerts` | `alerts:read` | Recent alerts (`?limit=&acknowledged=&type=&agentId=`) |
+| POST | `/alerts/:id/ack` | `alerts:ack` | Acknowledge (zone-checked) |
+| GET | `/system/mode` | `system:mode:read` | Current arm state |
+| POST | `/system/mode` | `system:arm` | Set `disarmed` \| `home` \| `away` (policy-checked) |
+| GET | `/notifications` | `notifications:read` | Delivery audit (admin) |
+| GET | `/health` | public | Liveness + DB reachability |
 
 WebSocket clients connect with `{ auth: { key } }` and receive `event`, `alert`, `mode`, and `agent`
-messages. Channel names are exported from `@cpe310/contracts` so a client cannot typo them.
+messages, zone-filtered. MQTT agents publish to `cpe310/agents/<id>/events` and `.../heartbeat` with
+their token in the payload.
 
 ---
 
@@ -270,24 +265,24 @@ python run_agent.py --type camera --id camera-lobby --location "Lobby" --real --
 python run_agent.py --type camera --id camera-gate  --location "Gate"  --real --source rtsp://...
 ```
 
-MOG2 background subtraction, shadow pixels thresholded out, morphological opening to stop one real
-blob fragmenting into sub-threshold specks, then a contour-area threshold (`--min-area`, default 1500
-px) and a cooldown (`--cooldown`, default 10s) so one person walking past is not dozens of events. The
-first 30 frames are discarded while the background model warms up — without that, every camera reports
-motion the instant it starts.
+MOG2 background subtraction, shadow pixels thresholded out, morphological opening so one real blob does
+not fragment into sub-threshold specks, then a contour-area threshold (`--min-area`, default 1500 px) and
+a cooldown (`--cooldown`, default 10s). The first 30 frames are discarded while the background model warms
+up — without that, every camera reports motion the instant it starts. A stream that dies is reconnected,
+then the agent exits: a blind camera that keeps heartbeating is worse than one that stops.
 
-> **OpenCV wheel caveat.** `opencv-python-headless` usually lags the newest CPython by months, and this
-> machine runs Python 3.14, so `pip` may attempt a source build needing CMake. `cv2` is imported
-> **lazily**, so simulation mode and the test suite work regardless. For a real camera, either run the
-> agent in Docker (`agents/Dockerfile` pins Python 3.12) or make a 3.12/3.13 virtualenv for it.
+Verified on Python 3.14 with `opencv-python-headless` 5.0.0 (wheel available, no source build) against a
+webcam, a local file, and a live RTSP stream. `cv2` is imported lazily, so simulation mode and the tests
+never need it.
 
 `--real --source 0` **cannot** work inside Docker Compose on Windows or macOS — Docker Desktop has no
-USB/webcam passthrough. Run the camera agent natively against the containerized hub:
+webcam passthrough. Run the camera agent natively against the containerized hub.
 
-```powershell
-$env:AGENT_API_KEY = "dev-key-change-me"
-python run_agent.py --type camera --id camera-lobby --location "Lobby" --real --source 0 --hub http://localhost:3000
-```
+**Video evidence** (`--record-evidence`) records a clip around each detection and uploads it to
+S3/MinIO. The clip starts *before* the detection: MOG2 only fires once a subject is well into frame, so a
+clip beginning at the trigger misses the entry. Encoding and upload run off the poll loop, so the clip is
+referenced a beat before it exists — `metadata.clip_available_after_ms` says how long to wait before
+treating a 404 as missing.
 
 ### Raspberry Pi sensors
 
@@ -295,8 +290,8 @@ python run_agent.py --type camera --id camera-lobby --location "Lobby" --real --
 pip install -r requirements-hardware.txt
 ```
 
-Then replace the marked stubs in [security_agent/sensors.py](agents/security_agent/sensors.py) — search
-for `HARDWARE STUB`, two commented lines per class:
+Then replace the marked stubs in [agents/security_agent/sensors.py](agents/security_agent/sensors.py) —
+search for `HARDWARE STUB`, two commented lines per class:
 
 ```python
 from gpiozero import MotionSensor      # GpioMotionSensor
@@ -307,37 +302,61 @@ from gpiozero import Button            # GpioDoorSensor
 self._device = Button(pin, pull_up=True)
 ```
 
-Run with `--real --pin <BCM pin>`. Nothing else changes: the agents talk to a `SensorReader` protocol,
-so simulated and real readers are interchangeable.
+Run with `--real --pin <BCM pin>`. Nothing else changes: the agents talk to a `SensorReader` protocol, so
+simulated and real readers are interchangeable.
+
+---
+
+## Failure handling
+
+Deliberate choices about what happens when things break, because "a security system that lies about its
+own health" is the failure that matters most.
+
+| Situation | Behavior | Why |
+|---|---|---|
+| Hub restarts while agents run | No alerts | Startup grace period |
+| Hub killed mid-sweep | Missing alerts raised on next boot | The sweep only looks at `online` agents, so a half-swept agent would sit silently offline forever |
+| Agent's clock is badly wrong | Event **stored**, warning logged | Never drop a real intrusion report over bad NTP; ordering uses hub time |
+| Hub unreachable when an agent reports | Buffered locally (cap 500), flushed in order | A brief outage must not lose the event that mattered |
+| Hub's database wiped | Agent gets 404/401, re-enrolls, retries | Fleet self-heals with nobody restarting anything |
+| Agent's heartbeat hits an unexpected error | Thread logs and keeps beating | A dead heartbeat thread would raise a tamper alert for a demonstrably live agent |
+| Sensor read throws | Logged, polling continues, backs off after 5 straight failures | A flaky sensor is a maintenance issue, not a reason to stop reporting liveness |
+| OpenCV missing / camera won't open | Agent exits with a fix-it message (code 3) | Retrying forever hides the problem |
+| Camera stream dies mid-run | Reconnects, then exits after 3 attempts | A blind camera reporting healthy heartbeats is worse than one that stops |
+| Notification channel fails | Retried with backoff from the database, capped at 5 attempts | In-memory retries would vanish on redeploy |
+| Notification channel unconfigured | Inert | An unset `SMTP_HOST` means "no email", not a failed delivery per alert |
+| Clip upload fails | Local copy **kept** | Deleting it would destroy the only remaining record |
+| MQTT payload without a valid token | Rejected | MQTT does not propagate the publisher's identity, so the topic alone is not evidence |
+
+**Input limits.** Bodies are capped at 64 kB; `?limit=` is clamped to `EVENTS_PAGE_MAX`. The hub refuses
+to boot on a credential under 8 characters, duplicate credentials, a heartbeat timeout not greater than
+the interval, or a sample key with `NODE_ENV=production`.
 
 ---
 
 ## Production roadmap
 
-1. ~~**Persistence**~~ — **done.** Postgres via Prisma; events, alerts, agents, and arm state all
-   persist. Agent liveness is a `lastSeenAt` column rather than Redis, which is fine at one hub
-   instance; Redis becomes worthwhile when running several.
-2. **Per-agent credentials** — replace the shared key with per-agent tokens issued at registration, or
-   mTLS on a private network. The single `agentApiKey` read in
-   [api-key.guard.ts](hub/src/common/guards/api-key.guard.ts) and the matching handshake check in
-   [realtime.gateway.ts](hub/src/realtime/realtime.gateway.ts) are the only places to change — both
-   share one constant-time comparison in `common/security/compare-key.ts`.
-3. **Notification fan-out** — the `notify()` TODO in
-   [alerts.service.ts](hub/src/alerts/alerts.service.ts) is where Twilio (SMS), FCM (push), or
-   nodemailer hook in. Dispatch on a queue, not inline: a slow provider must not delay event ingestion.
-4. **MQTT option** — at 20+ agents or on flaky networks, swap HTTP for MQTT (Mosquitto +
-   `paho-mqtt` on agents, `@nestjs/microservices` on the hub). `BaseAgent` only ever touches the
-   `Transport` interface, so this replaces `MqttTransport` and one line of `run_agent.py` — a transport
-   swap, not a rewrite.
-5. **Video evidence** — have `CameraAgent` save a short clip on motion and upload it (S3/MinIO),
-   referencing it in `metadata`. That field is free-form `Json` precisely so this needs no migration;
-   the TODO marks the spot.
-6. **Dashboard** — any frontend that speaks socket.io. Subscribe to `event` / `alert` / `mode` /
-   `agent`; [tools/ws-client.mjs](tools/ws-client.mjs) is a 90-line reference consumer.
+1. ~~**Persistence**~~ — **done.** Postgres via Prisma. Agent liveness is a `lastSeenAt` column rather
+   than Redis, which is fine at one hub instance.
+2. ~~**Per-agent credentials**~~ — **done.** Bootstrap-issued per-agent tokens (SHA-256 hashed at rest),
+   plus viewer/operator/admin roles with RBAC and ABAC. mTLS remains the next step up; the bootstrap key
+   is still a shared provisioning secret, so re-enrollments are counted and logged.
+3. ~~**Notification fan-out**~~ — **done.** Email (SMTP) and webhook behind an `AlertChannel` interface,
+   with persisted delivery records and database-backed retries. Twilio and FCM are a new file each plus
+   one line in the provider array.
+4. ~~**MQTT option**~~ — **done.** `--transport mqtt`; the hub ingests from MQTT and REST simultaneously
+   through the same services, so rules cannot drift between transports.
+5. ~~**Video evidence**~~ — **done.** Clips with pre-roll uploaded to S3/MinIO, referenced in `metadata`.
+6. ~~**Dashboard**~~ — **done.** React + Vite with TanStack Query, Zustand, and permission-driven UI.
+
+**Remaining, in rough priority order:** mTLS or short-lived enrollment tokens to replace the shared
+bootstrap secret; a users table so zones and roles are per-user rather than per-key; Redis for liveness
+once more than one hub instance runs; and an agent-confirmed upload so `clip_url` is never referenced
+before it exists.
 
 ## Configuration
 
-See [hub/.env.example](hub/.env.example) for every setting with defaults and rationale. Required:
-`AGENT_API_KEY` and `DATABASE_URL`. The hub validates its environment at boot and **exits with a plain
-message** on anything missing or contradictory, rather than starting and failing mysteriously later. It
-also refuses to start in production with the sample key still in place.
+See [hub/.env.example](hub/.env.example) for every setting with its default and rationale. Required:
+`AGENT_BOOTSTRAP_KEY`, `OPERATOR_KEY`, `DATABASE_URL`. The hub validates its environment at boot and
+exits with a plain message on anything missing or contradictory, rather than starting and failing
+mysteriously later.

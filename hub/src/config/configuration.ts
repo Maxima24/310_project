@@ -11,8 +11,14 @@ export interface AppConfig {
   auth: {
     /** Enrollment only. */
     bootstrapKey: string;
-    /** Dashboards and humans. */
+    /** Day-to-day operator. */
     operatorKey: string;
+    /** Read-only; undefined disables the role entirely. */
+    viewerKey?: string;
+    /** Agent locations a viewer may see. Empty means unrestricted. */
+    viewerZones: string[];
+    /** Overrides and the delivery audit; undefined disables the role. */
+    adminKey?: string;
   };
   corsOrigin: string | string[];
   liveness: {
@@ -65,6 +71,11 @@ export function loadConfiguration(): AppConfig {
     auth: {
       bootstrapKey: env.AGENT_BOOTSTRAP_KEY,
       operatorKey: env.OPERATOR_KEY,
+      viewerKey: env.VIEWER_KEY,
+      viewerZones: env.VIEWER_ZONES.split(',')
+        .map((zone) => zone.trim())
+        .filter(Boolean),
+      adminKey: env.ADMIN_KEY,
     },
     corsOrigin:
       env.CORS_ORIGIN === '*'

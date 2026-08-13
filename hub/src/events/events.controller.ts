@@ -1,7 +1,8 @@
 import type { EventView } from '@cpe310/contracts';
-import { Body, Controller, Get, HttpCode, HttpStatus, Post, Query } from '@nestjs/common';
+import { Body, Controller, Get, HttpCode, HttpStatus, Post, Query, Req } from '@nestjs/common';
 
-import { AgentOnly, OperatorOnly } from '../common/guards/roles.decorator';
+import type { AuthenticatedRequest } from '../common/guards/auth.guard';
+import { CanReadEvents, CanReportEvents } from '../common/guards/permissions.decorator';
 import { CreateEventDto } from './dto/create-event.dto';
 import { QueryEventsDto } from './dto/query-events.dto';
 import { EventsService, type IngestResult } from './events.service';
@@ -19,16 +20,19 @@ export class EventsController {
    * intrusion elsewhere.
    */
   @Post()
-  @AgentOnly()
+  @CanReportEvents()
   @HttpCode(HttpStatus.CREATED)
   ingest(@Body() dto: CreateEventDto): Promise<IngestResult> {
     return this.events.ingest(dto);
   }
 
-  /** History is operator information. */
+  /** Readable by viewers and above; zone-restricted callers see only their zones. */
   @Get()
-  @OperatorOnly()
-  findMany(@Query() query: QueryEventsDto): Promise<EventView[]> {
-    return this.events.findMany(query);
+  @CanReadEvents()
+  findMany(
+    @Query() query: QueryEventsDto,
+    @Req() request: AuthenticatedRequest,
+  ): Promise<EventView[]> {
+    return this.events.findMany(query, request.identity);
   }
 }

@@ -1,0 +1,13 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    // ESM output alongside the CommonJS build. The hub is CommonJS (NestJS), the
+    // dashboard is bundled by Vite; without an ESM entry, Rollup cannot statically
+    // resolve named imports through CommonJS `__exportStar` re-exports and the build
+    // fails with "X is not exported by dist/index.js".
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "outDir": "dist/esm",
+    "tsBuildInfoFile": "dist/esm/.tsbuildinfo"
+  }
+}

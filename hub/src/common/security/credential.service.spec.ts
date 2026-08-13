@@ -1,4 +1,4 @@
-import { AuthRole } from '@cpe310/contracts';
+import { AuthRole, Permission, permissionsForRole } from '@cpe310/contracts';
 import { ConfigService } from '@nestjs/config';
 import { Test } from '@nestjs/testing';
 
@@ -8,8 +8,14 @@ import { hashToken, mintAgentToken } from './tokens';
 
 const BOOTSTRAP = 'a-real-bootstrap-secret';
 const OPERATOR = 'a-real-operator-secret';
+const VIEWER = 'a-real-viewer-secret';
+const ADMIN = 'a-real-admin-secret';
+const ZONES = ['Hallway', 'Lobby'];
 
-async function buildService(agentForHash: { id: string } | null = null) {
+async function buildService(
+  agentForHash: { id: string } | null = null,
+  overrides: { viewer?: string; admin?: string } = { viewer: VIEWER, admin: ADMIN },
+) {
   const prisma = {
     agent: { findUnique: jest.fn().mockResolvedValue(agentForHash) },
   };
@@ -17,6 +23,9 @@ async function buildService(agentForHash: { id: string } | null = null) {
     get: jest.fn((key: string) => {
       if (key === 'auth.bootstrapKey') return BOOTSTRAP;
       if (key === 'auth.operatorKey') return OPERATOR;
+      if (key === 'auth.viewerKey') return 'viewer' in overrides ? overrides.viewer : VIEWER;
+      if (key === 'auth.adminKey') return 'admin' in overrides ? overrides.admin : ADMIN;
+      if (key === 'auth.viewerZones') return ZONES;
       return undefined;
     }),
   };
@@ -33,26 +42,69 @@ async function buildService(agentForHash: { id: string } | null = null) {
 }
 
 describe('CredentialService.resolve', () => {
-  it('recognises the operator key', async () => {
+  it('recognises the operator key and attaches its permissions', async () => {
     const { service } = await buildService();
 
-    await expect(service.resolve(OPERATOR)).resolves.toEqual({ role: AuthRole.Operator });
+    const identity = await service.resolve(OPERATOR);
+
+    expect(identity?.role).toBe(AuthRole.Operator);
+    // Permissions come from the shared role map, not from the call site.
+    expect(identity?.permissions).toEqual(permissionsForRole(AuthRole.Operator));
+    expect(identity?.zones).toEqual([]);
+  });
+
+  it('recognises the admin key', async () => {
+    const { service } = await buildService();
+
+    const identity = await service.resolve(ADMIN);
+
+    expect(identity?.role).toBe(AuthRole.Admin);
+    expect(identity?.permissions).toContain(Permission.NotificationsRead);
+  });
+
+  it('recognises the viewer key and applies its zones', async () => {
+    // The attribute-based half: same role, different entitlement.
+    const { service } = await buildService();
+
+    const identity = await service.resolve(VIEWER);
+
+    expect(identity?.role).toBe(AuthRole.Viewer);
+    expect(identity?.zones).toEqual(['Hallway', 'Lobby']);
+    expect(identity?.permissions).not.toContain(Permission.SystemDisarm);
+  });
+
+  it('does not zone-restrict operators or admins', async () => {
+    const { service } = await buildService();
+
+    expect((await service.resolve(OPERATOR))?.zones).toEqual([]);
+    expect((await service.resolve(ADMIN))?.zones).toEqual([]);
   });
 
   it('recognises the bootstrap key', async () => {
     const { service } = await buildService();
 
-    await expect(service.resolve(BOOTSTRAP)).resolves.toEqual({ role: AuthRole.Bootstrap });
+    const identity = await service.resolve(BOOTSTRAP);
+
+    expect(identity?.role).toBe(AuthRole.Bootstrap);
+    // Enrollment only — it cannot read anything.
+    expect(identity?.permissions).toEqual([Permission.AgentsEnroll]);
+  });
+
+  it('returns null for a viewer key when the role is not configured', async () => {
+    const { service } = await buildService(null, { viewer: undefined });
+
+    await expect(service.resolve(VIEWER)).resolves.toBeNull();
   });
 
   it('resolves a valid agent token to its owning agent', async () => {
     const { token } = mintAgentToken();
     const { service, prisma } = await buildService({ id: 'motion-hallway' });
 
-    await expect(service.resolve(token)).resolves.toEqual({
-      role: AuthRole.Agent,
-      agentId: 'motion-hallway',
-    });
+    const identity = await service.resolve(token);
+
+    expect(identity?.role).toBe(AuthRole.Agent);
+    expect(identity?.agentId).toBe('motion-hallway');
+    expect(identity?.permissions).toEqual(permissionsForRole(AuthRole.Agent));
     // Looked up by hash, never by plaintext — the hub stores no plaintext to match.
     expect(prisma.agent.findUnique).toHaveBeenCalledWith({
       where: { tokenHash: hashToken(token) },

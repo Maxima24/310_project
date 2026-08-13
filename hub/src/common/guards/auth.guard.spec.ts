@@ -1,11 +1,11 @@
-import { AuthRole } from '@cpe310/contracts';
+import { AuthRole, Permission, permissionsForRole } from '@cpe310/contracts';
 import { ExecutionContext, ForbiddenException, UnauthorizedException } from '@nestjs/common';
 import { Reflector } from '@nestjs/core';
 
 import { CredentialService, type Identity } from '../security/credential.service';
 import { AuthGuard } from './auth.guard';
+import { PERMISSIONS_KEY } from './permissions.decorator';
 import { IS_PUBLIC_KEY } from './public.decorator';
-import { ROLES_KEY } from './roles.decorator';
 
 interface RequestShape {
   method: string;
@@ -14,6 +14,15 @@ interface RequestShape {
   params?: Record<string, string>;
   body?: Record<string, unknown>;
   identity?: Identity;
+}
+
+function identityFor(role: AuthRole, agentId?: string): Identity {
+  return {
+    role,
+    permissions: permissionsForRole(role),
+    zones: [],
+    ...(agentId ? { agentId } : {}),
+  };
 }
 
 function contextFor(request: RequestShape, type = 'http'): ExecutionContext {
@@ -25,12 +34,11 @@ function contextFor(request: RequestShape, type = 'http'): ExecutionContext {
   } as unknown as ExecutionContext;
 }
 
-/** Reflector stub returning the metadata a route would carry. */
-function reflectorFor(metadata: { isPublic?: boolean; roles?: AuthRole[] }): Reflector {
+function reflectorFor(metadata: { isPublic?: boolean; permissions?: Permission[] }): Reflector {
   return {
     getAllAndOverride: (key: string) => {
       if (key === IS_PUBLIC_KEY) return metadata.isPublic;
-      if (key === ROLES_KEY) return metadata.roles;
+      if (key === PERMISSIONS_KEY) return metadata.permissions;
       return undefined;
     },
   } as unknown as Reflector;
@@ -38,7 +46,7 @@ function reflectorFor(metadata: { isPublic?: boolean; roles?: AuthRole[] }): Ref
 
 function guardFor(
   identity: Identity | null,
-  metadata: { isPublic?: boolean; roles?: AuthRole[] } = {},
+  metadata: { isPublic?: boolean; permissions?: Permission[] } = {},
 ): AuthGuard {
   const credentials = {
     resolve: jest.fn().mockResolvedValue(identity),
@@ -53,7 +61,7 @@ const req = (over: Partial<RequestShape> = {}): RequestShape => ({
   ...over,
 });
 
-describe('AuthGuard credential handling', () => {
+describe('AuthGuard authentication', () => {
   it('lets a @Public route through with no credential at all', async () => {
     const guard = guardFor(null, { isPublic: true });
 
@@ -61,7 +69,7 @@ describe('AuthGuard credential handling', () => {
   });
 
   it('401s when the Authorization header is missing', async () => {
-    const guard = guardFor(null);
+    const guard = guardFor(null, { permissions: [Permission.AlertsRead] });
 
     await expect(guard.canActivate(contextFor(req({ headers: {} })))).rejects.toThrow(
       UnauthorizedException,
@@ -69,7 +77,7 @@ describe('AuthGuard credential handling', () => {
   });
 
   it('401s on a credential the hub does not recognise', async () => {
-    const guard = guardFor(null);
+    const guard = guardFor(null, { permissions: [Permission.AlertsRead] });
 
     await expect(guard.canActivate(contextFor(req()))).rejects.toThrow(UnauthorizedException);
   });
@@ -82,110 +90,151 @@ describe('AuthGuard credential handling', () => {
 
   it('attaches the resolved identity to the request', async () => {
     const request = req({ originalUrl: '/agents', params: {}, body: {} });
-    const guard = guardFor({ role: AuthRole.Operator }, { roles: [AuthRole.Operator] });
+    const guard = guardFor(identityFor(AuthRole.Operator), {
+      permissions: [Permission.AgentsRead],
+    });
 
     await guard.canActivate(contextFor(request));
 
-    expect(request.identity).toEqual({ role: AuthRole.Operator });
+    expect(request.identity?.role).toBe(AuthRole.Operator);
   });
 });
 
-describe('AuthGuard role enforcement', () => {
-  it('defaults to requiring operator when a route declares no roles', async () => {
-    // A route added later must be locked down, not silently reachable by a sensor.
-    const guard = guardFor({ role: AuthRole.Agent, agentId: 'motion-hallway' });
+describe('AuthGuard permission enforcement', () => {
+  it('denies a route that declares no permissions at all', async () => {
+    // Fails closed: treating a missing decorator as "anyone authenticated" is how a
+    // sensor token ends up able to disarm.
+    const guard = guardFor(identityFor(AuthRole.Admin), {});
 
     await expect(guard.canActivate(contextFor(req()))).rejects.toThrow(ForbiddenException);
   });
 
-  it('allows a matching role', async () => {
-    const guard = guardFor({ role: AuthRole.Bootstrap }, { roles: [AuthRole.Bootstrap] });
+  it('allows a caller holding the required permission', async () => {
+    const guard = guardFor(identityFor(AuthRole.Viewer), {
+      permissions: [Permission.AlertsRead],
+    });
 
     await expect(guard.canActivate(contextFor(req({ body: {} })))).resolves.toBe(true);
   });
 
-  it.each([
-    ['bootstrap key', AuthRole.Bootstrap],
-    ['agent token', AuthRole.Agent],
-  ])('403s when a %s is used on an operator-only route', async (_label, role) => {
-    // Arming/disarming and acknowledging alerts must be unreachable from a sensor:
-    // an intruder who compromised one could otherwise silence its own alert.
-    const guard = guardFor({ role, agentId: 'motion-hallway' }, { roles: [AuthRole.Operator] });
+  it('requires ALL declared permissions, not any of them', async () => {
+    const guard = guardFor(identityFor(AuthRole.Viewer), {
+      permissions: [Permission.AlertsRead, Permission.AlertsAck],
+    });
 
-    await expect(guard.canActivate(contextFor(req()))).rejects.toThrow(ForbiddenException);
+    await expect(guard.canActivate(contextFor(req()))).rejects.toThrow(/alerts:ack/);
   });
 
-  it('403s when an operator key is used on an enrollment-only route', async () => {
-    const guard = guardFor({ role: AuthRole.Operator }, { roles: [AuthRole.Bootstrap] });
+  it('names the missing permission and the role, so a 403 is diagnosable', async () => {
+    const guard = guardFor(identityFor(AuthRole.Viewer), {
+      permissions: [Permission.SystemDisarm],
+    });
 
-    await expect(guard.canActivate(contextFor(req()))).rejects.toThrow(ForbiddenException);
+    await expect(guard.canActivate(contextFor(req()))).rejects.toThrow(
+      /system:disarm.*"viewer"/s,
+    );
+  });
+});
+
+describe('AuthGuard role capabilities', () => {
+  // The table that matters: what each role can actually reach. Derived from the shared
+  // ROLE_PERMISSIONS map, so a change there shows up here rather than silently.
+  const cases: Array<[AuthRole, Permission, boolean]> = [
+    [AuthRole.Viewer, Permission.AlertsRead, true],
+    [AuthRole.Viewer, Permission.AlertsAck, false],
+    [AuthRole.Viewer, Permission.SystemArm, false],
+    [AuthRole.Viewer, Permission.SystemDisarm, false],
+    [AuthRole.Viewer, Permission.NotificationsRead, false],
+    [AuthRole.Operator, Permission.AlertsAck, true],
+    [AuthRole.Operator, Permission.SystemArm, true],
+    [AuthRole.Operator, Permission.SystemDisarm, true],
+    [AuthRole.Operator, Permission.NotificationsRead, false],
+    [AuthRole.Admin, Permission.NotificationsRead, true],
+    [AuthRole.Admin, Permission.SystemDisarm, true],
+    // Agents and the bootstrap key hold no read permissions at all.
+    [AuthRole.Agent, Permission.AlertsRead, false],
+    [AuthRole.Agent, Permission.EventsWrite, true],
+    [AuthRole.Agent, Permission.SystemDisarm, false],
+    [AuthRole.Bootstrap, Permission.AgentsEnroll, true],
+    [AuthRole.Bootstrap, Permission.AgentsRead, false],
+    [AuthRole.Bootstrap, Permission.EventsWrite, false],
+  ];
+
+  it.each(cases)('%s %s -> %s', async (role, permission, allowed) => {
+    const guard = guardFor(identityFor(role, 'motion-hallway'), { permissions: [permission] });
+    const request = req({ params: {}, body: { agentId: 'motion-hallway' } });
+
+    if (allowed) {
+      await expect(guard.canActivate(contextFor(request))).resolves.toBe(true);
+    } else {
+      await expect(guard.canActivate(contextFor(request))).rejects.toThrow(ForbiddenException);
+    }
   });
 });
 
 describe('AuthGuard agent scoping', () => {
-  const agentIdentity: Identity = { role: AuthRole.Agent, agentId: 'motion-hallway' };
-  const agentRoute = { roles: [AuthRole.Agent] };
+  const agentRoute = { permissions: [Permission.EventsWrite] };
+  const agent = () => identityFor(AuthRole.Agent, 'motion-hallway');
 
   it('allows an agent to post an event as itself', async () => {
-    const guard = guardFor(agentIdentity, agentRoute);
-    const request = req({ body: { agentId: 'motion-hallway' } });
+    const guard = guardFor(agent(), agentRoute);
 
-    await expect(guard.canActivate(contextFor(request))).resolves.toBe(true);
+    await expect(
+      guard.canActivate(contextFor(req({ body: { agentId: 'motion-hallway' } }))),
+    ).resolves.toBe(true);
   });
 
   it('blocks an agent from posting an event as a different sensor', async () => {
-    // The concrete win of roadmap 2: a compromised motion sensor cannot inject a
-    // `door_closed` for the front door to mask an intrusion.
-    const guard = guardFor(agentIdentity, agentRoute);
-    const request = req({ body: { agentId: 'door-front' } });
+    // A compromised motion sensor must not be able to inject a `door_closed` for the
+    // front door to mask an intrusion.
+    const guard = guardFor(agent(), agentRoute);
 
-    await expect(guard.canActivate(contextFor(request))).rejects.toThrow(
-      /cannot act as "door-front"/,
-    );
-  });
-
-  it('allows an agent to heartbeat for itself', async () => {
-    const guard = guardFor(agentIdentity, agentRoute);
-    const request = req({
-      originalUrl: '/agents/motion-hallway/heartbeat',
-      params: { id: 'motion-hallway' },
-    });
-
-    await expect(guard.canActivate(contextFor(request))).resolves.toBe(true);
+    await expect(
+      guard.canActivate(contextFor(req({ body: { agentId: 'door-front' } }))),
+    ).rejects.toThrow(/cannot act as "door-front"/);
   });
 
   it('blocks an agent from faking a heartbeat for a sensor it disabled', async () => {
-    const guard = guardFor(agentIdentity, agentRoute);
-    const request = req({
-      originalUrl: '/agents/door-front/heartbeat',
-      params: { id: 'door-front' },
-    });
+    const guard = guardFor(agent(), { permissions: [Permission.AgentsHeartbeat] });
 
-    await expect(guard.canActivate(contextFor(request))).rejects.toThrow(ForbiddenException);
+    await expect(
+      guard.canActivate(
+        contextFor(
+          req({ originalUrl: '/agents/door-front/heartbeat', params: { id: 'door-front' } }),
+        ),
+      ),
+    ).rejects.toThrow(ForbiddenException);
   });
 
   it('prefers the path param over the body when both are present', async () => {
-    const guard = guardFor(agentIdentity, agentRoute);
-    const request = req({
-      params: { id: 'door-front' },
-      body: { agentId: 'motion-hallway' },
-    });
+    const guard = guardFor(agent(), agentRoute);
 
-    await expect(guard.canActivate(contextFor(request))).rejects.toThrow(ForbiddenException);
+    await expect(
+      guard.canActivate(
+        contextFor(req({ params: { id: 'door-front' }, body: { agentId: 'motion-hallway' } })),
+      ),
+    ).rejects.toThrow(ForbiddenException);
   });
 
   it('rejects a non-string agentId rather than coercing it', async () => {
-    // `{"agentId": {...}}` must not slip past a loose equality check.
-    const guard = guardFor(agentIdentity, agentRoute);
-    const request = req({ body: { agentId: { toString: () => 'motion-hallway' } } });
+    const guard = guardFor(agent(), agentRoute);
 
-    await expect(guard.canActivate(contextFor(request))).rejects.toThrow(ForbiddenException);
+    await expect(
+      guard.canActivate(
+        contextFor(req({ body: { agentId: { toString: () => 'motion-hallway' } } })),
+      ),
+    ).rejects.toThrow(ForbiddenException);
   });
 
-  it('allows a request that claims no agent id at all', async () => {
-    // Nothing to impersonate; DTO validation handles a genuinely missing field.
-    const guard = guardFor(agentIdentity, agentRoute);
+  it('does not apply self-scoping to human roles', async () => {
+    // An operator acknowledging an alert has an :id in the path that is an alert id,
+    // not an agent id — scoping must not fire on it.
+    const guard = guardFor(identityFor(AuthRole.Operator), {
+      permissions: [Permission.AlertsAck],
+    });
 
-    await expect(guard.canActivate(contextFor(req({ body: {} })))).resolves.toBe(true);
+    await expect(
+      guard.canActivate(contextFor(req({ params: { id: 'some-alert-uuid' } }))),
+    ).resolves.toBe(true);
   });
 });

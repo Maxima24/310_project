@@ -1,14 +1,15 @@
 import { Global, Module } from '@nestjs/common';
 
 import { CredentialService } from './credential.service';
+import { PolicyService } from './policy.service';
 
 /**
- * Global because credential resolution is needed by the HTTP guard, the WebSocket
- * gateway, and MQTT ingestion — three entry points that must agree on identity.
+ * Global because authorization is needed by the HTTP guard, the WebSocket gateway, MQTT
+ * ingestion, and several controllers — all of which must agree on identity and policy.
  */
 @Global()
 @Module({
-  providers: [CredentialService],
-  exports: [CredentialService],
+  providers: [CredentialService, PolicyService],
+  exports: [CredentialService, PolicyService],
 })
 export class SecurityModule {}

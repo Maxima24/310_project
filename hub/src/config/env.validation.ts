@@ -29,9 +29,14 @@ export enum SeverityLevel {
 export const SAMPLE_BOOTSTRAP_KEY = 'dev-bootstrap-key-change-me';
 export const SAMPLE_OPERATOR_KEY = 'dev-operator-key-change-me';
 
+export const SAMPLE_VIEWER_KEY = 'dev-viewer-key-change-me';
+export const SAMPLE_ADMIN_KEY = 'dev-admin-key-change-me';
+
 export const SAMPLE_KEYS = new Set<string>([
   SAMPLE_BOOTSTRAP_KEY,
   SAMPLE_OPERATOR_KEY,
+  SAMPLE_VIEWER_KEY,
+  SAMPLE_ADMIN_KEY,
   // The pre-roadmap-2 shared key, refused outright so an old .env cannot be carried
   // forward into production.
   'dev-key-change-me',
@@ -73,6 +78,35 @@ export class EnvVars {
   @IsNotEmpty({ message: 'OPERATOR_KEY is required — copy .env.example to .env and set one.' })
   @MinLength(8, { message: 'OPERATOR_KEY must be at least 8 characters.' })
   OPERATOR_KEY: string;
+
+  /**
+   * Read-only credential. Optional: leave unset and there is simply no viewer role.
+   * Restrict what it can see with VIEWER_ZONES.
+   */
+  @IsOptional()
+  @IsString()
+  @MinLength(8, { message: 'VIEWER_KEY must be at least 8 characters when set.' })
+  VIEWER_KEY?: string;
+
+  /**
+   * Comma-separated agent locations a viewer may see. Empty means everything.
+   * The attribute-based half of the model: two callers with the same role can be
+   * entitled to different data.
+   *
+   * One key with one zone list is proportionate here; per-user zones want a users
+   * table, which is the documented next step.
+   */
+  @IsString()
+  VIEWER_ZONES: string = '';
+
+  /**
+   * Admin credential: everything an operator can do, plus the notification audit and
+   * the override for disarming while a critical alert is unacknowledged. Optional.
+   */
+  @IsOptional()
+  @IsString()
+  @MinLength(8, { message: 'ADMIN_KEY must be at least 8 characters when set.' })
+  ADMIN_KEY?: string;
 
   @IsString()
   @IsNotEmpty({ message: 'DATABASE_URL is required (postgresql://user:pass@host:5432/db).' })
@@ -235,22 +269,37 @@ export function validateEnv(raw: Record<string, unknown>): EnvVars {
   }
 
   if (config.NODE_ENV === NodeEnv.Production) {
-    for (const key of ['AGENT_BOOTSTRAP_KEY', 'OPERATOR_KEY'] as const) {
-      if (SAMPLE_KEYS.has(config[key])) {
+    for (const key of ['AGENT_BOOTSTRAP_KEY', 'OPERATOR_KEY', 'VIEWER_KEY', 'ADMIN_KEY'] as const) {
+      const value = config[key];
+      if (value && SAMPLE_KEYS.has(value)) {
         throw new Error(
-          `${key} is still a sample value ("${config[key]}"). Set a real secret before running in production.`,
+          `${key} is still a sample value ("${value}"). Set a real secret before running in production.`,
         );
       }
     }
   }
 
-  if (config.AGENT_BOOTSTRAP_KEY === config.OPERATOR_KEY) {
-    // Identical secrets collapse the two roles back into one shared key and undo
-    // the entire point of separating them: any agent host could then arm/disarm.
-    throw new Error(
-      'AGENT_BOOTSTRAP_KEY and OPERATOR_KEY must differ — reusing one secret for both ' +
-        'gives every agent host operator privileges.',
-    );
+  // Every configured credential must be distinct. A duplicate silently collapses two
+  // roles into one — reusing the bootstrap key as the operator key would hand every
+  // agent host the ability to disarm, and a viewer key equal to the admin key would
+  // make the read-only role a full override.
+  const configured = Object.entries({
+    AGENT_BOOTSTRAP_KEY: config.AGENT_BOOTSTRAP_KEY,
+    OPERATOR_KEY: config.OPERATOR_KEY,
+    VIEWER_KEY: config.VIEWER_KEY,
+    ADMIN_KEY: config.ADMIN_KEY,
+  }).filter((entry): entry is [string, string] => Boolean(entry[1]));
+
+  const seen = new Map<string, string>();
+  for (const [name, secret] of configured) {
+    const previous = seen.get(secret);
+    if (previous) {
+      throw new Error(
+        `${name} and ${previous} are the same value — each credential must be distinct, ` +
+          'or the roles collapse into one and the separation is meaningless.',
+      );
+    }
+    seen.set(secret, name);
   }
 
   if (config.HEARTBEAT_TIMEOUT_MS <= config.HEARTBEAT_INTERVAL_MS) {

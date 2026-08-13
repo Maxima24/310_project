@@ -5,6 +5,7 @@ import { ScheduleModule } from '@nestjs/schedule';
 
 import { AgentsModule } from './agents/agents.module';
 import { AlertsModule } from './alerts/alerts.module';
+import { AuthModule } from './auth/auth.module';
 import { AuthGuard } from './common/guards/auth.guard';
 import { PrismaModule } from './common/prisma/prisma.module';
 import { SecurityModule } from './common/security/security.module';
@@ -28,6 +29,7 @@ import { SystemModule } from './system/system.module';
     ScheduleModule.forRoot(),
     PrismaModule,
     SecurityModule,
+    AuthModule,
     RealtimeModule,
     SystemModule,
     NotificationsModule,

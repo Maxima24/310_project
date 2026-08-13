@@ -10,6 +10,7 @@ import type { Agent } from '@prisma/client';
 
 import { AlertsService } from '../alerts/alerts.service';
 import { PrismaService } from '../common/prisma/prisma.service';
+import type { Identity } from '../common/security/credential.service';
 import { mintAgentToken } from '../common/security/tokens';
 import { RealtimeGateway } from '../realtime/realtime.gateway';
 
@@ -151,8 +152,17 @@ export class AgentsService {
     return this.prisma.agent.findUnique({ where: { id } });
   }
 
-  async findAll(): Promise<AgentView[]> {
+  /**
+   * Lists agents, filtered to the caller's zones when it is zone-restricted.
+   *
+   * Filtering happens in the query rather than after fetching: a viewer scoped to one
+   * wing should never have the rest of the building in the response at all.
+   */
+  async findAll(identity?: Identity): Promise<AgentView[]> {
+    const zones = identity?.zones.length ? identity.zones : null;
+
     const agents = await this.prisma.agent.findMany({
+      where: zones ? { location: { in: zones, mode: 'insensitive' } } : undefined,
       // Offline first: Postgres orders an enum by declaration order, and
       // AgentStatus declares `online` before `offline`, so `desc` surfaces the
       // agents that need attention at the top of the list.

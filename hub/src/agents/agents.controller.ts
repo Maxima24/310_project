@@ -1,7 +1,12 @@
 import type { AgentAckResponse, AgentView } from '@cpe310/contracts';
-import { Body, Controller, Get, HttpCode, HttpStatus, Param, Post } from '@nestjs/common';
+import { Body, Controller, Get, HttpCode, HttpStatus, Param, Post, Req } from '@nestjs/common';
 
-import { AgentOnly, BootstrapOnly, OperatorOnly } from '../common/guards/roles.decorator';
+import type { AuthenticatedRequest } from '../common/guards/auth.guard';
+import {
+  CanEnrollAgents,
+  CanHeartbeat,
+  CanReadAgents,
+} from '../common/guards/permissions.decorator';
 import { AgentsService } from './agents.service';
 import { RegisterAgentDto } from './dto/register-agent.dto';
 
@@ -14,7 +19,7 @@ export class AgentsController {
    * own — and cannot be used for anything else.
    */
   @Post('register')
-  @BootstrapOnly()
+  @CanEnrollAgents()
   @HttpCode(HttpStatus.OK)
   register(@Body() dto: RegisterAgentDto): Promise<AgentAckResponse> {
     return this.agents.register(dto);
@@ -22,16 +27,19 @@ export class AgentsController {
 
   /** The guard additionally enforces that `:id` matches the calling token's agent. */
   @Post(':id/heartbeat')
-  @AgentOnly()
+  @CanHeartbeat()
   @HttpCode(HttpStatus.OK)
   heartbeat(@Param('id') id: string): Promise<AgentAckResponse> {
     return this.agents.heartbeat(id);
   }
 
-  /** Fleet status is operator information — a sensor has no business enumerating its peers. */
+  /**
+   * Fleet status. Sensors cannot enumerate their peers, and a zone-restricted viewer
+   * sees only the agents in its own zones.
+   */
   @Get()
-  @OperatorOnly()
-  findAll(): Promise<AgentView[]> {
-    return this.agents.findAll();
+  @CanReadAgents()
+  findAll(@Req() request: AuthenticatedRequest): Promise<AgentView[]> {
+    return this.agents.findAll(request.identity);
   }
 }

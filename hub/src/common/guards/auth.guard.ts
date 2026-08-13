@@ -1,4 +1,4 @@
-import { AuthRole } from '@cpe310/contracts';
+import { AuthRole, Permission } from '@cpe310/contracts';
 import {
   CanActivate,
   ExecutionContext,
@@ -13,8 +13,8 @@ import type { Request } from 'express';
 import type { Identity } from '../security/credential.service';
 import { CredentialService } from '../security/credential.service';
 import { extractBearer, redact } from '../security/tokens';
+import { PERMISSIONS_KEY } from './permissions.decorator';
 import { IS_PUBLIC_KEY } from './public.decorator';
-import { ROLES_KEY } from './roles.decorator';
 
 /** Requests carry their resolved identity so controllers need not re-parse the header. */
 export interface AuthenticatedRequest extends Request {
@@ -22,17 +22,16 @@ export interface AuthenticatedRequest extends Request {
 }
 
 /**
- * Role-based auth for every HTTP route (roadmap item 2).
+ * Authentication plus the role-based half of authorization.
  *
- * Replaces the single shared `x-agent-key`, under which any key holder could forge
- * an event as any sensor, disarm the system, and acknowledge alerts. Now:
+ * Replaces the single shared key, under which any holder could forge an event as any
+ * sensor, disarm the system, and acknowledge alerts. Now each credential resolves to a
+ * role, each role carries a permission set, and each route declares the permissions it
+ * needs.
  *
- *   - the bootstrap key can only enroll agents,
- *   - an agent token can only speak for its own agent,
- *   - only the operator credential can arm/disarm, acknowledge, or read history.
- *
- * Routes with no @Roles decorator require Operator, so anything added later is
- * locked down by default rather than accidentally reachable by a sensor token.
+ * Attribute-based rules — disarming during an active incident, zone scoping — are NOT
+ * here: they depend on database state and produce reasons a human should read, so they
+ * live in PolicyService and are applied by the services that own the action.
  */
 @Injectable()
 export class AuthGuard implements CanActivate {
@@ -74,19 +73,30 @@ export class AuthGuard implements CanActivate {
 
     request.identity = identity;
 
-    const allowed =
-      this.reflector.getAllAndOverride<AuthRole[]>(ROLES_KEY, [
+    const required =
+      this.reflector.getAllAndOverride<Permission[]>(PERMISSIONS_KEY, [
         context.getHandler(),
         context.getClass(),
-      ]) ?? [AuthRole.Operator];
+      ]) ?? [];
 
-    if (!allowed.includes(identity.role)) {
+    if (required.length === 0) {
+      // Fail closed. A route with no declared permissions is a mistake, and treating
+      // it as "anyone authenticated" is how a sensor token ends up able to disarm.
+      this.logger.error(
+        `${request.method} ${request.originalUrl} declares no required permissions — denying. ` +
+          'Add @RequirePermissions(...) or @Public().',
+      );
+      throw new ForbiddenException('This endpoint is not accessible');
+    }
+
+    const missing = required.filter((permission) => !identity.permissions.includes(permission));
+    if (missing.length > 0) {
       this.logger.warn(
         `Rejected ${request.method} ${request.originalUrl}: role "${identity.role}" ` +
-          `not in [${allowed.join(', ')}]`,
+          `lacks ${missing.join(', ')}`,
       );
       throw new ForbiddenException(
-        `This endpoint requires one of: ${allowed.join(', ')} (you are ${identity.role})`,
+        `Requires ${missing.join(', ')} — the "${identity.role}" role does not have it.`,
       );
     }
 
@@ -100,11 +110,10 @@ export class AuthGuard implements CanActivate {
   /**
    * An agent token may only act for its own agent.
    *
-   * This is the concrete win of roadmap item 2: previously a single compromised
-   * sensor could inject a `door_closed` for the front door to mask an intrusion, or
-   * fake heartbeats for a sensor it had physically disabled. The agent id appears in
-   * the path (`/agents/:id/heartbeat`) or the body (`/events`), and both must match
-   * the token's owner.
+   * Previously a single compromised sensor could inject a `door_closed` for the front
+   * door to mask an intrusion, or fake heartbeats for a sensor it had physically
+   * disabled. The agent id appears in the path (`/agents/:id/heartbeat`) or the body
+   * (`/events`), and both must match the token's owner.
    */
   private assertActingAsSelf(request: AuthenticatedRequest, identity: Identity): void {
     const claimed =
