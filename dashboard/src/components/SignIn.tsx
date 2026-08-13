@@ -1,5 +1,6 @@
 import { useState } from 'react';
 
+import { Button, Icon } from './ui';
 import { api } from '../lib/api';
 import { useSessionStore } from '../stores/session.store';
 
@@ -56,28 +57,44 @@ export function SignIn() {
   return (
     <div className="signin">
       <form className="signin-card" onSubmit={submit}>
-        <h1>Security Hub</h1>
-        <p className="muted">
+        <div className="signin-brand">
+          <span className="brand-mark">
+            <Icon name="shield" size={17} />
+          </span>
+          <h1>Sentinel</h1>
+        </div>
+
+        <p>
           Enter a viewer, operator, or admin credential. The hub decides what you can do — this
           page only reflects it. Agent tokens cannot sign in.
         </p>
 
-        <label htmlFor="credential">Credential</label>
-        <input
-          id="credential"
-          type="password"
-          autoComplete="current-password"
-          value={value}
-          onChange={(e) => setValue(e.target.value)}
-          placeholder="VIEWER_KEY / OPERATOR_KEY / ADMIN_KEY"
-          autoFocus
-        />
+        <div className="field">
+          <label className="label" htmlFor="credential">
+            Credential
+          </label>
+          <input
+            id="credential"
+            className="input"
+            type="password"
+            autoComplete="current-password"
+            value={value}
+            onChange={(e) => setValue(e.target.value)}
+            placeholder="VIEWER_KEY / OPERATOR_KEY / ADMIN_KEY"
+            autoFocus
+          />
+        </div>
 
-        {error && <p className="signin-error">{error}</p>}
+        {error && <p className="form-error">{error}</p>}
 
-        <button type="submit" disabled={checking || value.trim().length === 0}>
+        <Button
+          type="submit"
+          variant="primary"
+          disabled={checking || value.trim().length === 0}
+          style={{ marginTop: 'var(--s2)', height: 40 }}
+        >
           {checking ? 'Checking…' : 'Connect'}
-        </button>
+        </Button>
       </form>
     </div>
   );

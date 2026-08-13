@@ -4,15 +4,16 @@
   "private": true,
   "description": "Central hub: agent registry, event ingestion, alert engine, WebSocket feed",
   "scripts": {
-    "//generate": "The Prisma client is GENERATED, not committed — hub/src imports types from it, so nothing here compiles until it exists. Every task that reads those types therefore generates first, or a fresh clone fails with '@prisma/client did not initialize yet'. `prisma generate` needs no DATABASE_URL and is idempotent, so the cost is ~1s and the repo builds from a clean checkout on any package manager.",
-    "generate": "prisma generate",
-    "build": "prisma generate && nest build",
+    "//generate": "The Prisma client is GENERATED, not committed — hub/src imports types from it, so nothing here compiles until it exists, and a fresh clone otherwise fails with '@prisma/client did not initialize yet'. Every task that reads those types runs ensure-prisma-client first, which regenerates only when the client is missing or older than the schema. Generating unconditionally broke `pnpm test` while the hub was running: on Windows the query engine is a loaded DLL and prisma generate dies with EPERM renaming it.",
+    "generate": "node scripts/ensure-prisma-client.mjs",
+    "generate:force": "prisma generate",
+    "build": "node scripts/ensure-prisma-client.mjs && nest build",
     "start": "node dist/main.js",
-    "start:dev": "prisma generate && nest start --watch",
-    "dev": "prisma generate && nest start --watch",
-    "test": "prisma generate && jest",
+    "start:dev": "node scripts/ensure-prisma-client.mjs && nest start --watch",
+    "dev": "node scripts/ensure-prisma-client.mjs && nest start --watch",
+    "test": "node scripts/ensure-prisma-client.mjs && jest",
     "test:watch": "jest --watch",
-    "lint": "prisma generate && tsc -p tsconfig.json --noEmit",
+    "lint": "node scripts/ensure-prisma-client.mjs && tsc -p tsconfig.json --noEmit",
     "db:seed": "prisma db seed"
   },
   "prisma": {

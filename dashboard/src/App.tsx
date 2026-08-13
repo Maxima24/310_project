@@ -38,6 +38,7 @@ export function App() {
   if (identity.isPending) {
     return (
       <div className="boot">
+        <span className="spinner" aria-hidden="true" />
         <p className="muted">Checking credential…</p>
       </div>
     );
@@ -46,10 +47,10 @@ export function App() {
   if (identity.isError || !identity.data) {
     return (
       <div className="boot">
-        <p className="signin-error">
+        <p className="form-error">
           {identity.error instanceof Error ? identity.error.message : 'Could not reach the hub.'}
         </p>
-        <button className="link-button" onClick={signOut}>
+        <button className="link-btn" onClick={signOut}>
           Use a different credential
         </button>
       </div>

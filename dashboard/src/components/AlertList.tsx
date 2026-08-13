@@ -1,5 +1,6 @@
 import type { AlertView } from '@cpe310/contracts';
 
+import { Button, Card, CountBadge, Empty, Pill, type Tone } from './ui';
 import { ApiError } from '../lib/api';
 import { canAcknowledgeAlert, usePermissions } from '../lib/permissions';
 import { useAcknowledge, useAgents } from '../lib/queries';
@@ -10,6 +11,12 @@ const FILTERS: Array<{ value: AlertFilter; label: string }> = [
   { value: 'critical', label: 'Critical' },
   { value: 'all', label: 'All' },
 ];
+
+const SEVERITY_TONE: Record<string, Tone> = {
+  critical: 'critical',
+  warning: 'warn',
+  info: 'info',
+};
 
 export function AlertList({
   alerts,
@@ -30,25 +37,28 @@ export function AlertList({
   const locationOf = (agentId: string) => agents.data?.find((a) => a.id === agentId)?.location;
 
   return (
-    <>
-      <h2>
-        Alerts
-        <span className="badge">{totalCount}</span>
-        <div className="filter-group" role="group" aria-label="Alert filter">
+    <Card
+      title="Alerts"
+      icon="bell"
+      badge={<CountBadge>{totalCount}</CountBadge>}
+      actions={
+        <div className="filters" role="group" aria-label="Filter alerts">
           {FILTERS.map((filter) => (
             <button
               key={filter.value}
-              className={filter.value === alertFilter ? 'chip chip-active' : 'chip'}
+              className="filter"
+              aria-pressed={filter.value === alertFilter}
               onClick={() => setAlertFilter(filter.value)}
             >
               {filter.label}
             </button>
           ))}
         </div>
-      </h2>
-
+      }
+      flush
+    >
       {acknowledge.isError && (
-        <p className="mode-error">
+        <p className="command-note command-note-error" style={{ padding: '0 16px 8px' }}>
           {acknowledge.error instanceof ApiError
             ? acknowledge.error.message
             : 'Could not acknowledge that alert.'}
@@ -56,13 +66,13 @@ export function AlertList({
       )}
 
       {loading ? (
-        <p className="muted">Loading alerts…</p>
+        <Empty icon="bell">Loading alerts…</Empty>
       ) : alerts.length === 0 ? (
-        <p className="muted">
-          {totalCount === 0 ? 'No alerts.' : 'No alerts match the current filter.'}
-        </p>
+        <Empty icon={totalCount === 0 ? 'check' : 'bell'}>
+          {totalCount === 0 ? 'Nothing to report.' : 'No alerts match this filter.'}
+        </Empty>
       ) : (
-        <ul className="alert-list">
+        <ul className="alert-list card-scroll">
           {alerts.map((alert) => {
             const decision = canAcknowledgeAlert(identity, alert, locationOf);
 
@@ -72,15 +82,20 @@ export function AlertList({
                 className={`alert alert-${alert.severity} ${alert.acknowledged ? 'alert-acked' : ''}`}
               >
                 <div className="alert-main">
-                  <div className="alert-line">
-                    <span className={`sev sev-${alert.severity}`}>{alert.severity}</span>
+                  <div className="alert-top">
+                    <Pill tone={SEVERITY_TONE[alert.severity] ?? 'idle'}>{alert.severity}</Pill>
                     <span className="alert-type">{alert.type}</span>
-                    <time className="muted" dateTime={alert.createdAt}>
-                      {new Date(alert.createdAt).toLocaleTimeString()}
+                    <time className="alert-time" dateTime={alert.createdAt}>
+                      {new Date(alert.createdAt).toLocaleTimeString([], {
+                        hour: '2-digit',
+                        minute: '2-digit',
+                      })}
                     </time>
                   </div>
-                  <p className="alert-message">{alert.message}</p>
-                  <p className="muted alert-context">
+
+                  <p className="alert-msg">{alert.message}</p>
+
+                  <p className="alert-meta">
                     {/* The arm mode is why this alert exists at all — the same event
                         would have been silent while disarmed. */}
                     raised while <strong>{alert.modeAtTrigger}</strong>
@@ -90,21 +105,24 @@ export function AlertList({
 
                 <div className="alert-actions">
                   {alert.acknowledged ? (
-                    <span className="acked">acknowledged</span>
+                    <span className="dim" style={{ fontSize: 'var(--text-xs)' }}>
+                      acked
+                    </span>
                   ) : canAcknowledge ? (
-                    <button
-                      className="ack-btn"
+                    <Button
+                      size="sm"
+                      icon="check"
                       disabled={!decision.allowed || acknowledge.isPending}
-                      title={decision.allowed ? undefined : decision.reason}
+                      title={decision.allowed ? 'Acknowledge' : decision.reason}
                       onClick={() => acknowledge.mutate(alert)}
                     >
-                      Acknowledge
-                    </button>
+                      Ack
+                    </Button>
                   ) : (
                     // Shown rather than omitted, so a viewer understands the alert is
                     // actionable by someone — just not by them.
-                    <span className="acked" title="Requires the operator role">
-                      operator only
+                    <span className="dim" style={{ fontSize: 'var(--text-xs)' }} title="Requires the operator role">
+                      operator
                     </span>
                   )}
                 </div>
@@ -113,6 +131,6 @@ export function AlertList({
           })}
         </ul>
       )}
-    </>
+    </Card>
   );
 }

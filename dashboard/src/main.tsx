@@ -3,7 +3,9 @@ import { StrictMode } from 'react';
 import { createRoot } from 'react-dom/client';
 
 import { App } from './App';
-import './styles.css';
+// Tokens first: every rule in app.css resolves against them.
+import './styles/tokens.css';
+import './styles/app.css';
 
 /**
  * One QueryClient for the app. TanStack Query owns all server state; the socket layer

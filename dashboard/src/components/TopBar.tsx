@@ -1,53 +1,88 @@
+import { Icon, IconButton, type IconName } from './ui';
 import { usePermissions } from '../lib/permissions';
 import { useSessionStore } from '../stores/session.store';
 
-const CONNECTION_LABEL: Record<string, string> = {
+/**
+ * Application shell header.
+ *
+ * The nav is a single pill group with the active item expanded to show its label —
+ * icons alone are ambiguous, labels alone are wide, and this gets both without a
+ * tooltip. Sections beyond the overview are not built yet, so they are rendered
+ * disabled rather than as links that go nowhere.
+ */
+const NAV: Array<{ id: string; icon: IconName; label: string; ready: boolean }> = [
+  { id: 'overview', icon: 'home', label: 'Overview', ready: true },
+  { id: 'cameras', icon: 'camera', label: 'Cameras', ready: false },
+  { id: 'events', icon: 'chart', label: 'Reports', ready: false },
+  { id: 'settings', icon: 'settings', label: 'Settings', ready: false },
+];
+
+const CONNECTION_TONE: Record<string, string> = {
+  live: 'ok',
+  connecting: 'warn',
+  offline: 'warn',
+  rejected: 'critical',
   idle: 'idle',
-  connecting: 'connecting',
-  live: 'live',
-  rejected: 'feed rejected',
-  offline: 'reconnecting',
 };
 
-export function TopBar() {
+const CONNECTION_LABEL: Record<string, string> = {
+  live: 'Live',
+  connecting: 'Connecting',
+  offline: 'Reconnecting',
+  rejected: 'Feed rejected',
+  idle: 'Idle',
+};
+
+export function TopBar({ onRefresh }: { onRefresh: () => void }) {
   const connection = useSessionStore((s) => s.connection);
   const signOut = useSessionStore((s) => s.signOut);
-  const { role, zones, isZoneRestricted } = usePermissions();
+  const { role } = usePermissions();
+
+  const tone = CONNECTION_TONE[connection] ?? 'idle';
 
   return (
-    <>
-      <header className="topbar">
-        <div className="brand">
-          <span className={`brand-dot dot-${connection}`} aria-hidden="true" />
-          <h1>Security Hub</h1>
-          {/* The role is always visible: an operator should never have to guess why a
-              control is missing. */}
-          <span className={`role-chip role-${role}`}>{role}</span>
-        </div>
+    <header className="topbar">
+      <div className="brand">
+        <span className="brand-mark">
+          <Icon name="shield" size={17} />
+        </span>
+        <span className="brand-name">Sentinel</span>
+      </div>
 
-        <div className="topbar-right">
-          <span className={`conn conn-${connection}`}>
-            {CONNECTION_LABEL[connection] ?? connection}
-          </span>
-          <button className="link-button" onClick={signOut}>
-            Sign out
+      <nav className="nav" aria-label="Sections">
+        {NAV.map((item) => (
+          <button
+            key={item.id}
+            className="nav-item"
+            aria-current={item.id === 'overview' ? 'page' : undefined}
+            disabled={!item.ready}
+            title={item.ready ? item.label : `${item.label} — not built yet`}
+          >
+            <Icon name={item.icon} size={16} />
+            {item.id === 'overview' && <span className="nav-label">{item.label}</span>}
           </button>
-        </div>
-      </header>
+        ))}
+      </nav>
 
-      {isZoneRestricted && (
-        <div className="banner banner-info">
-          Zone-restricted credential — showing only {zones.join(', ')}. Agents, events, and
-          alerts elsewhere in the building are filtered out by the hub, not merely hidden here.
-        </div>
-      )}
+      <div className="topbar-right">
+        {/* The feed's health belongs in the chrome: if it is down, everything below is
+            stale, and that matters more than any single panel. */}
+        <span className={`pill pill-${tone}`} title={`Live feed: ${connection}`}>
+          <span className="pill-dot" />
+          {CONNECTION_LABEL[connection] ?? connection}
+        </span>
 
-      {connection === 'rejected' && (
-        <div className="banner banner-error">
-          The hub refused this credential for the live feed. Data shown may be stale — sign out
-          and re-enter it.
-        </div>
-      )}
-    </>
+        <IconButton icon="refresh" label="Refresh data" onClick={onRefresh} />
+
+        <button className="user" onClick={signOut} title="Sign out">
+          <span className="avatar">{role.slice(0, 2).toUpperCase()}</span>
+          <span className="user-text">
+            <span className="user-name">Signed in</span>
+            <span className="user-role">{role}</span>
+          </span>
+          <Icon name="logout" size={15} />
+        </button>
+      </div>
+    </header>
   );
 }

@@ -5,16 +5,24 @@ import {
   type SystemModeResponse,
 } from '@cpe310/contracts';
 
+import { Icon, Pill } from './ui';
 import { ApiError } from '../lib/api';
 import { evaluateModeChange, usePermissions } from '../lib/permissions';
 import { useSetMode } from '../lib/queries';
 
 const DESCRIPTION: Record<SystemMode, string> = {
-  disarmed: 'Sensors report; nothing alerts except a silent agent.',
+  disarmed: 'Sensors report. Nothing alerts except a silent agent.',
   home: 'Interior motion ignored, doors still guarded.',
   away: 'Any sensor activity is an intrusion.',
 };
 
+/**
+ * The arm state, and the only control that changes it.
+ *
+ * Given its own band with a state-coloured left edge because it is the most
+ * consequential action on the page: an operator should be able to tell whether the
+ * building is armed from across a room.
+ */
 export function ModeControl({
   mode,
   alerts,
@@ -30,18 +38,18 @@ export function ModeControl({
   const unacknowledged = alerts.filter((a) => !a.acknowledged);
 
   return (
-    <section className={`mode mode-${current ?? 'unknown'}`}>
-      <div className="mode-state">
-        <span className="mode-label">System</span>
-        <strong className="mode-value">{current ?? '…'}</strong>
-        {current && <span className="mode-hint">{DESCRIPTION[current]}</span>}
+    <section className={`command command-${current ?? 'disarmed'}`}>
+      <div className="command-state">
+        <span className="label">System</span>
+        <span className="command-value">{current ?? '—'}</span>
+        {current && <span className="command-hint">{DESCRIPTION[current]}</span>}
       </div>
 
       {canArm ? (
-        <div className="mode-buttons" role="group" aria-label="Arm state">
+        <div className="segmented" role="group" aria-label="Arm state">
           {SYSTEM_MODES.map((option) => {
-            // The same policy the hub enforces, evaluated up front so the reason can be
-            // shown on the control rather than arriving as a 403 after the click.
+            // The hub's policy, evaluated before the click, so a refusal can be
+            // explained on the control instead of arriving as a 403 afterwards.
             const decision = evaluateModeChange(identity, option, alerts);
             const isCurrent = option === current;
             const blocked = !decision.allowed;
@@ -49,48 +57,42 @@ export function ModeControl({
             return (
               <button
                 key={option}
-                className={[
-                  'mode-btn',
-                  isCurrent ? 'mode-btn-active' : '',
-                  blocked ? 'mode-btn-blocked' : '',
-                ]
-                  .join(' ')
-                  .trim()}
+                className={`segment ${blocked ? 'segment-locked' : ''}`}
+                aria-pressed={isCurrent}
                 disabled={isCurrent || blocked || setMode.isPending}
-                // Explains *why* on hover, which a plain disabled button never does.
                 title={blocked ? decision.reason : DESCRIPTION[option]}
                 onClick={() => setMode.mutate(option)}
               >
+                {blocked && <Icon name="lock" size={12} />}
                 {option}
-                {blocked && (
-                  <span className="lock" aria-hidden="true">
-                    🔒
-                  </span>
-                )}
               </button>
             );
           })}
         </div>
       ) : (
-        <p className="muted mode-readonly">
-          Read-only credential — arm state is shown but cannot be changed.
-        </p>
+        <p className="command-hint">Read-only credential — arm state is shown, not editable.</p>
       )}
 
-      <div className="mode-counts">
+      <div className="command-meta">
         {openCritical.length > 0 ? (
-          <span className="pill pill-critical">{openCritical.length} critical</span>
+          <Pill tone="critical" dot>
+            {openCritical.length} critical
+          </Pill>
         ) : unacknowledged.length > 0 ? (
-          <span className="pill pill-warning">{unacknowledged.length} open</span>
+          <Pill tone="warn" dot>
+            {unacknowledged.length} open
+          </Pill>
         ) : (
-          <span className="pill pill-ok">all clear</span>
+          <Pill tone="ok" dot>
+            All clear
+          </Pill>
         )}
       </div>
 
-      {/* A refusal that got past the client-side check — the hub is authoritative and
+      {/* A refusal that got past the client-side check. The hub is authoritative and
           may know about alerts this client has not loaded. */}
       {setMode.isError && (
-        <p className="mode-error">
+        <p className="command-note command-note-error">
           {setMode.error instanceof ApiError ? setMode.error.message : 'Could not change mode.'}
           {setMode.error instanceof ApiError && setMode.error.requiresRole && (
             <> Requires the {setMode.error.requiresRole} role.</>
@@ -98,9 +100,8 @@ export function ModeControl({
         </p>
       )}
 
-      {/* Explains the padlocks without needing a hover, which matters on a wall display. */}
-      {canArm && openCritical.length > 0 && (
-        <p className="mode-note">
+      {canArm && openCritical.length > 0 && !setMode.isError && (
+        <p className="command-note">
           Disarming is locked while {openCritical.length} critical alert
           {openCritical.length === 1 ? ' is' : 's are'} unacknowledged. Acknowledge to unlock, or
           sign in as an admin to override.

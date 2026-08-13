@@ -1,6 +1,7 @@
 import type { CameraStatusView } from '@cpe310/contracts';
 import { useEffect, useState } from 'react';
 
+import { Empty, Icon } from './ui';
 import { api } from '../lib/api';
 import { API_BASE } from '../lib/config';
 import { usePermissions } from '../lib/permissions';
@@ -24,10 +25,10 @@ export function LiveView() {
 
   if (!canReadAgents) return null;
 
-  if (cameras.isPending) return <p className="muted">Loading cameras…</p>;
+  if (cameras.isPending) return <Empty icon="camera">Loading cameras…</Empty>;
 
   if (list.length === 0) {
-    return <p className="muted">No cameras in view.</p>;
+    return <Empty icon="camera">No cameras in view.</Empty>;
   }
 
   return (
@@ -61,36 +62,38 @@ function CameraTile({
             <CameraStream agentId={camera.agentId} />
           ) : (
             <button className="camera-play" onClick={onWatch}>
-              <span className="camera-play-icon" aria-hidden="true">▶</span>
+              <Icon name="play" size={12} />
               Watch live
             </button>
           )
         ) : (
           <div className="camera-empty">
-            <span className="camera-empty-mark" aria-hidden="true">◼</span>
+            <Icon name="camera" size={24} />
             <span>No signal</span>
             {/* Says which of the several causes it is, rather than leaving the operator
                 to guess between "camera off", "simulated", and "hub cannot see it". */}
             <span className="camera-empty-hint">
-              Camera is simulated, stopped, or was started without <code>--stream</code>
+              Simulated, stopped, or started without <span className="mono">--stream</span>
             </span>
           </div>
         )}
       </div>
 
       <figcaption className="camera-meta">
-        <span className="camera-name">{camera.location}</span>
-        <span className="camera-id">{camera.agentId}</span>
+        <span className="camera-name truncate">{camera.location}</span>
+        <span className="camera-id truncate">{camera.agentId}</span>
         {camera.streaming ? (
           <span className="camera-live">
             <span className="camera-dot" aria-hidden="true"></span>
-            live{camera.width ? ` · ${camera.width}×${camera.height}` : ''}
+            live{camera.width ? ` ${camera.width}×${camera.height}` : ''}
           </span>
         ) : (
-          <span className="muted">offline</span>
+          <span className="dim" style={{ marginLeft: 'auto', fontSize: 'var(--text-xs)' }}>
+            offline
+          </span>
         )}
         {watching && (
-          <button className="link-button" onClick={onWatch}>
+          <button className="link-btn" onClick={onWatch}>
             Stop
           </button>
         )}

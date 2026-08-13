@@ -1,19 +1,20 @@
 import type { AgentView } from '@cpe310/contracts';
 
+import { Empty, Icon, Pill, type IconName } from './ui';
 import { useUiStore } from '../stores/ui.store';
 
-const TYPE_ICON: Record<string, string> = {
-  motion: '◉',
-  door: '▭',
-  camera: '▣',
+const TYPE_ICON: Record<string, IconName> = {
+  motion: 'motion',
+  door: 'door',
+  camera: 'camera',
 };
 
 export function AgentGrid({ agents, loading }: { agents: AgentView[]; loading: boolean }) {
   const focusedAgentId = useUiStore((s) => s.focusedAgentId);
   const focusAgent = useUiStore((s) => s.focusAgent);
 
-  if (loading) return <p className="muted">Loading agents…</p>;
-  if (agents.length === 0) return <p className="muted">No agents registered yet.</p>;
+  if (loading) return <Empty icon="signal">Loading agents…</Empty>;
+  if (agents.length === 0) return <Empty icon="signal">No agents registered yet.</Empty>;
 
   // Offline first: a silent sensor is the thing needing attention, and it is treated as
   // possible tampering rather than a harmless disconnect.
@@ -23,53 +24,60 @@ export function AgentGrid({ agents, loading }: { agents: AgentView[]; loading: b
   });
 
   return (
-    <ul className="agent-grid">
-      {sorted.map((agent) => (
-        <li key={agent.id}>
-          <button
-            type="button"
-            className={[
-              'agent',
-              `agent-${agent.status}`,
-              focusedAgentId === agent.id ? 'agent-focused' : '',
-            ]
-              .join(' ')
-              .trim()}
-            // Filters the event stream and alert list to this sensor; clicking again clears it.
-            onClick={() => focusAgent(agent.id)}
-            title={
-              focusedAgentId === agent.id ? 'Clear filter' : 'Filter events and alerts to this agent'
-            }
-          >
-            <span className="agent-head">
-              <span className="agent-icon" aria-hidden="true">
-                {TYPE_ICON[agent.type] ?? '•'}
-              </span>
-              <span className="agent-id">{agent.id}</span>
-              <span className={`dot dot-${agent.status}`} title={agent.status} />
-            </span>
+    <ul className="agent-list">
+      {sorted.map((agent) => {
+        const focused = focusedAgentId === agent.id;
 
-            <span className="agent-meta">
-              <span>{agent.location}</span>
-              <span className="muted">
-                {agent.status === 'offline'
-                  ? `silent ${formatAge(agent.secondsSinceLastSeen)}`
-                  : `seen ${formatAge(agent.secondsSinceLastSeen)} ago`}
+        return (
+          <li key={agent.id}>
+            <button
+              type="button"
+              className={[
+                'agent',
+                agent.status === 'offline' ? 'agent-offline' : '',
+                focused ? 'agent-focused' : '',
+              ]
+                .filter(Boolean)
+                .join(' ')}
+              // Filters the event and alert panels to this sensor; clicking again clears it.
+              onClick={() => focusAgent(agent.id)}
+              aria-pressed={focused}
+              title={focused ? 'Clear filter' : 'Filter events and alerts to this agent'}
+            >
+              <span className="agent-icon">
+                <Icon name={TYPE_ICON[agent.type] ?? 'signal'} size={17} />
               </span>
-            </span>
 
-            {agent.capabilities.length > 0 && (
-              <span className="agent-caps">
-                {agent.capabilities.map((cap) => (
-                  <span key={cap} className="cap">
-                    {cap}
+              <span className="agent-body">
+                <span className="agent-name truncate">{agent.location}</span>
+                <span className="agent-sub">
+                  <span className="agent-id truncate">{agent.id}</span>
+                </span>
+                {agent.capabilities.length > 0 && (
+                  <span className="caps">
+                    {agent.capabilities.map((cap) => (
+                      <span key={cap} className="cap">
+                        {cap}
+                      </span>
+                    ))}
                   </span>
-                ))}
+                )}
               </span>
-            )}
-          </button>
-        </li>
-      ))}
+
+              <span className="agent-right">
+                <Pill tone={agent.status === 'online' ? 'ok' : 'critical'} dot>
+                  {agent.status}
+                </Pill>
+                <span className="agent-seen">
+                  {agent.status === 'offline'
+                    ? `silent ${formatAge(agent.secondsSinceLastSeen)}`
+                    : `${formatAge(agent.secondsSinceLastSeen)} ago`}
+                </span>
+              </span>
+            </button>
+          </li>
+        );
+      })}
     </ul>
   );
 }

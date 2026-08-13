@@ -1,25 +1,41 @@
 import type { EventView } from '@cpe310/contracts';
 
+import { Empty, Icon, Pill, type Tone } from './ui';
+
 /**
- * Live event log, including a link to video evidence when a camera attached one
- * (roadmap item 5).
+ * Live event log, with a link to video evidence when a camera attached one.
  */
+
+/** Events that mean something happened get colour; the rest stay quiet. */
+const EVENT_TONE: Record<string, Tone> = {
+  motion_detected: 'warn',
+  camera_motion: 'warn',
+  door_opened: 'warn',
+  door_closed: 'idle',
+};
+
 export function EventStream({ events, loading }: { events: EventView[]; loading: boolean }) {
-  if (loading) return <p className="muted">Loading events…</p>;
-  if (events.length === 0) {
-    return <p className="muted">Waiting for events…</p>;
-  }
+  if (loading) return <Empty icon="chart">Loading events…</Empty>;
+  if (events.length === 0) return <Empty icon="chart">Waiting for events…</Empty>;
 
   return (
-    <ol className="event-stream">
+    <ol className="events card-scroll">
       {events.map((event) => (
         <li key={event.id} className="event">
-          <time className="event-time muted" dateTime={event.createdAt}>
-            {new Date(event.createdAt).toLocaleTimeString()}
+          <time className="event-time" dateTime={event.createdAt}>
+            {new Date(event.createdAt).toLocaleTimeString([], {
+              hour: '2-digit',
+              minute: '2-digit',
+              second: '2-digit',
+            })}
           </time>
-          <span className={`event-type event-${event.type}`}>{event.type}</span>
-          <span className="event-agent">{event.agentId}</span>
-          <span className="event-meta muted">{summarise(event)}</span>
+
+          <Pill tone={EVENT_TONE[event.type] ?? 'idle'}>{event.type.replace(/_/g, ' ')}</Pill>
+
+          <span className="event-agent truncate">{event.agentId}</span>
+
+          <span className="event-meta truncate">{summarise(event)}</span>
+
           <ClipLink event={event} />
         </li>
       ))}
@@ -32,11 +48,9 @@ function summarise(event: EventView): string {
   const meta = event.metadata as Record<string, unknown>;
   const parts: string[] = [];
 
-  if (typeof meta.contour_area === 'number') {
-    parts.push(`${Math.round(meta.contour_area)}px`);
-  }
-  if (typeof meta.source === 'string' && meta.source !== 'pir' && meta.source !== 'reed_switch') {
-    parts.push(String(meta.source));
+  if (typeof meta.contour_area === 'number') parts.push(`${Math.round(meta.contour_area)}px`);
+  if (typeof meta.source === 'string' && !['pir', 'reed_switch'].includes(meta.source)) {
+    parts.push(meta.source.length > 26 ? `${meta.source.slice(0, 26)}…` : meta.source);
   }
   if (meta.initial === true) parts.push('at startup');
 
@@ -46,12 +60,11 @@ function summarise(event: EventView): string {
 function ClipLink({ event }: { event: EventView }) {
   const meta = event.metadata as Record<string, unknown>;
   const url = typeof meta.clip_url === 'string' ? meta.clip_url : null;
-  if (!url) return null;
+  if (!url) return <span />;
 
-  // The clip is referenced slightly before it exists (encode + upload happen off the
-  // agent's poll loop), so the title explains a 404 rather than leaving it a mystery.
-  const waitMs =
-    typeof meta.clip_available_after_ms === 'number' ? meta.clip_available_after_ms : 0;
+  // The clip is referenced a beat before it exists — encode and upload happen off the
+  // agent's poll loop — so the title explains a 404 rather than leaving it a mystery.
+  const waitMs = typeof meta.clip_available_after_ms === 'number' ? meta.clip_available_after_ms : 0;
 
   return (
     <a
@@ -61,6 +74,7 @@ function ClipLink({ event }: { event: EventView }) {
       rel="noreferrer"
       title={`Video evidence. Available ~${Math.ceil(waitMs / 1000)}s after the event; retry if not found yet.`}
     >
+      <Icon name="clip" size={11} />
       clip
     </a>
   );
