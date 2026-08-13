@@ -77,6 +77,28 @@ services:
       postgres:
         condition: service_healthy
 
+  # Object store for video evidence (roadmap item 5). S3-compatible, so switching to
+  # real S3 is an endpoint and credentials change, not a code change.
+  # Console at http://localhost:9001 (minioadmin / minioadmin).
+  minio:
+    image: minio/minio:latest
+    restart: unless-stopped
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${S3_ACCESS_KEY:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${S3_SECRET_KEY:-minioadmin}
+    ports:
+      - '${MINIO_PORT:-9000}:9000'
+      - '${MINIO_CONSOLE_PORT:-9001}:9001'
+    volumes:
+      - minio-data:/data
+    healthcheck:
+      test: ['CMD', 'mc', 'ready', 'local']
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
   # --- Simulated collector agents ------------------------------------------
   # All three share one image; only the arguments differ.
 
@@ -97,3 +119,4 @@ services:
 
 volumes:
   postgres-data:
+  minio-data:

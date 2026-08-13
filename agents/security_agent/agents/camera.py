@@ -15,7 +15,8 @@ import time
 from typing import Any
 
 from ..base import AgentConfigurationError, BaseAgent
-from ..contracts import AgentType, EventType, SensorEvent
+from ..contracts import AgentType, EventType, SensorEvent, iso_now
+from ..evidence import ClipUploader, EvidenceRecorder
 from ..transport import Transport
 
 log = logging.getLogger(__name__)
@@ -56,6 +57,8 @@ class CameraAgent(BaseAgent):
         heartbeat_interval: float = 10.0,
         simulated_probability: float = 0.03,
         seed: int | None = None,
+        recorder: EvidenceRecorder | None = None,
+        uploader: ClipUploader | None = None,
     ) -> None:
         super().__init__(
             agent_id,
@@ -80,6 +83,13 @@ class CameraAgent(BaseAgent):
         self._kernel: Any = None
         self._read_failures = 0
         self._reopen_attempts = 0
+        self._recorder = recorder
+        self._uploader = uploader
+        #: Lower bound on when a clip can exist: the post-roll must finish recording
+        #: first. Published so a consumer knows how long to wait before retrying.
+        self._post_roll_ms = recorder.post_roll_ms if recorder is not None else 0
+        if recorder is not None:
+            self.capabilities = [*self.capabilities, "evidence"]
 
     @property
     def agent_type(self) -> AgentType:
@@ -97,7 +107,46 @@ class CameraAgent(BaseAgent):
             return []
         self._last_emit = now
 
+        detection = {**detection, **self._start_evidence_clip()}
         return [self.make_event(EventType.CAMERA_MOTION, **detection)]
+
+    def _start_evidence_clip(self) -> dict[str, Any]:
+        """Kicks off clip capture and returns the metadata referencing it.
+
+        The reference is returned immediately rather than after the upload completes:
+        the event matters more than the clip, and blocking ingestion on encode plus an
+        object-store round trip would delay the alert by seconds — precisely while
+        something is happening.
+
+        The consequence is that the clip is referenced slightly **before it exists**
+        (observed lag: ~300-400ms for a 2s clip, bounded below by post-roll duration).
+        A consumer fetching `clip_url` should therefore treat a 404 as "not yet" and
+        retry, not as "lost". No `clip_status` field is published, because a status
+        written at detection time could never be updated afterwards and would sit at
+        "pending" forever — a permanently wrong field is worse than none.
+
+        Making this exact would need the agent to confirm the upload against the
+        created event, which means threading the hub's event id back into the upload
+        worker. Worth doing if a dashboard needs to distinguish "still uploading" from
+        "genuinely missing"; the retry rule is sufficient until then.
+        """
+        if self._recorder is None:
+            return {}
+
+        # Sortable, collision-free, and grouped per agent so a bucket lifecycle rule
+        # can expire evidence per camera.
+        stamp = iso_now().replace(":", "-").replace(".", "-")
+        object_key = f"{self.agent_id}/{stamp}.mp4"
+        self._recorder.begin_clip(object_key)
+
+        metadata: dict[str, Any] = {
+            "clip_key": object_key,
+            # How long a consumer should expect to wait before the object exists.
+            "clip_available_after_ms": int(self._post_roll_ms),
+        }
+        if self._uploader is not None:
+            metadata["clip_url"] = self._uploader.url_for(object_key)
+        return metadata
 
     # -- simulated ---------------------------------------------------------
 
@@ -169,6 +218,13 @@ class CameraAgent(BaseAgent):
         self._read_failures = 0
         self._reopen_attempts = 0
         self._frame_index += 1
+
+        # Every frame feeds the rolling buffer, so a clip triggered later already has
+        # its pre-roll in hand — motion is only detected once a subject is well into
+        # frame, and a clip starting at the trigger would miss the entry.
+        if self._recorder is not None:
+            self._recorder.observe(frame)
+
         mask = self._subtractor.apply(frame)
 
         if self._frame_index <= WARMUP_FRAMES:
@@ -191,9 +247,8 @@ class CameraAgent(BaseAgent):
             "source": str(self._source),
             "frame": self._frame_index,
             "contour_area": round(float(largest), 1),
-            # TODO(roadmap-5): write a short clip around this frame, upload it to
-            # S3/MinIO, and add its URL here — metadata is free-form precisely so
-            # this needs no migration.
+            # Clip references are added by _start_evidence_clip (roadmap item 5) —
+            # metadata is free-form precisely so that needed no migration.
         }
 
     def _reopen(self) -> None:
@@ -234,5 +289,9 @@ class CameraAgent(BaseAgent):
         self._read_failures = 0
 
     def on_shutdown(self) -> None:
+        # Recorder first: it flushes a clip still collecting post-roll, so shutting
+        # down mid-incident does not discard that incident's evidence.
+        if self._recorder is not None:
+            self._recorder.close()
         if self._capture is not None:
             self._capture.release()

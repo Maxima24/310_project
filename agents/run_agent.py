@@ -28,6 +28,7 @@ from security_agent.agents import CameraAgent, DoorAgent, MotionAgent
 from security_agent.base import AgentConfigurationError, BaseAgent
 from security_agent.contracts import AgentType
 from security_agent.credentials import TokenStore
+from security_agent.evidence import ClipUploader, EvidenceRecorder
 from security_agent.sensors import (
     GpioDoorSensor,
     GpioMotionSensor,
@@ -134,6 +135,52 @@ def build_parser() -> argparse.ArgumentParser:
         help="Seconds to wait before reporting the same kind of activity again "
         "(default: 5 for motion, 10 for camera). Distinct from the hub's alert dedup.",
     )
+    evidence = parser.add_argument_group("video evidence (camera, roadmap item 5)")
+    evidence.add_argument(
+        "--record-evidence",
+        action="store_true",
+        help="Record a short clip around each detection. Needs --real and opencv; "
+        "uploads to S3/MinIO when --s3-endpoint is set, otherwise keeps clips locally.",
+    )
+    evidence.add_argument(
+        "--clip-dir",
+        default=os.environ.get("CLIP_DIR", "clips"),
+        help="Where clips are written before upload (default ./clips).",
+    )
+    evidence.add_argument(
+        "--pre-roll",
+        type=non_negative_float,
+        default=2.0,
+        help="Seconds of footage kept from BEFORE the detection (default 2). Motion is "
+        "only detected once a subject is well into frame, so this is what captures the entry.",
+    )
+    evidence.add_argument(
+        "--post-roll",
+        type=positive_float,
+        default=3.0,
+        help="Seconds recorded after the detection (default 3).",
+    )
+    evidence.add_argument(
+        "--keep-local-clips",
+        action="store_true",
+        help="Keep the local copy after a successful upload. Off by default: a Pi's SD "
+        "card fills within days otherwise.",
+    )
+    evidence.add_argument(
+        "--s3-endpoint",
+        default=os.environ.get("S3_ENDPOINT"),
+        help="S3/MinIO endpoint, e.g. http://localhost:9000 (env S3_ENDPOINT).",
+    )
+    evidence.add_argument(
+        "--s3-bucket", default=os.environ.get("S3_BUCKET", "evidence"), help="Bucket name."
+    )
+    evidence.add_argument(
+        "--s3-public-url",
+        default=os.environ.get("S3_PUBLIC_URL"),
+        help="Base URL to embed in event metadata, when it differs from the endpoint "
+        "the agent uploads through (e.g. a container name vs a browser-reachable host).",
+    )
+
     creds = parser.add_argument_group("credentials")
     creds.add_argument(
         "--token-dir",
@@ -155,6 +202,57 @@ def build_parser() -> argparse.ArgumentParser:
         help="Logging verbosity.",
     )
     return parser
+
+
+def build_evidence(
+    args: argparse.Namespace,
+) -> tuple[ClipUploader | None, EvidenceRecorder | None]:
+    """Wires up clip recording, and an uploader only if a store was configured.
+
+    Recording without an uploader is deliberately supported: clips land on disk, which
+    is enough for a single-camera setup with no object store.
+    """
+    if not args.record_evidence:
+        return None, None
+
+    if not args.real:
+        # Simulated frames do not exist, so there is nothing to record. Say so rather
+        # than silently producing no clips.
+        print(
+            "--record-evidence needs --real (there are no frames to record in "
+            "simulation mode); continuing without evidence capture.",
+            file=sys.stderr,
+        )
+        return None, None
+
+    uploader = None
+    if args.s3_endpoint:
+        uploader = ClipUploader(
+            endpoint=args.s3_endpoint,
+            bucket=args.s3_bucket,
+            access_key=os.environ.get("S3_ACCESS_KEY", "minioadmin"),
+            secret_key=os.environ.get("S3_SECRET_KEY", "minioadmin"),
+            public_base_url=args.s3_public_url,
+        )
+    else:
+        print(
+            "No --s3-endpoint set; clips will be kept locally in "
+            f"{args.clip_dir} and not uploaded.",
+            file=sys.stderr,
+        )
+
+    recorder = EvidenceRecorder(
+        args.id,
+        uploader=uploader,
+        output_dir=Path(args.clip_dir),
+        pre_roll_seconds=args.pre_roll,
+        post_roll_seconds=args.post_roll,
+        # A camera polls every 0.2s by default, so ~5fps of captured frames. Matching
+        # the writer's fps to the real capture rate keeps playback speed honest.
+        fps=max(1.0, 1.0 / (args.interval if args.interval != 1.0 else 0.2)),
+        keep_local=args.keep_local_clips or uploader is None,
+    )
+    return uploader, recorder
 
 
 def build_agent(args: argparse.Namespace, transport: HttpTransport) -> BaseAgent:
@@ -183,6 +281,8 @@ def build_agent(args: argparse.Namespace, transport: HttpTransport) -> BaseAgent
             heartbeat_interval=args.heartbeat_interval,
         )
 
+    uploader, recorder = build_evidence(args)
+
     return CameraAgent(
         args.id,
         args.location,
@@ -191,6 +291,8 @@ def build_agent(args: argparse.Namespace, transport: HttpTransport) -> BaseAgent
         source=args.source,
         min_area=args.min_area,
         cooldown=args.cooldown if args.cooldown is not None else 10.0,
+        recorder=recorder,
+        uploader=uploader,
         # A camera polls faster than a PIR: frames are the unit of work, and the
         # cooldown (not the poll rate) is what limits reporting.
         poll_interval=args.interval if args.interval != 1.0 else 0.2,
