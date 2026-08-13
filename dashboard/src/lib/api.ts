@@ -151,4 +151,19 @@ export const api = {
    */
   streamTicket: (agentId: string) =>
     request<StreamTicketResponse>(`/cameras/${agentId}/ticket`, { method: 'POST' }),
+
+  /**
+   * Latest still as a blob, for the snapshot button.
+   *
+   * Goes through fetch rather than an `<img src>` so it carries the Authorization
+   * header — no ticket needed, because unlike the stream this is one ordinary request.
+   */
+  snapshot: async (agentId: string): Promise<Blob> => {
+    const response = await fetch(`${API_BASE}/cameras/${agentId}/snapshot`, {
+      headers: { Authorization: `Bearer ${currentCredential()}` },
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+    });
+    if (!response.ok) throw await toApiError(response);
+    return response.blob();
+  },
 };

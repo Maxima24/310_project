@@ -16,13 +16,39 @@
 export interface CameraStatusView {
   agentId: string;
   location: string;
-  /** False when the camera is simulated, stopped, or was started without --stream. */
+  /**
+   * False when the camera is simulated, stopped, or was started without --stream.
+   *
+   * This — not an `<img>` error — is the authoritative liveness signal. A client that
+   * reconnects on image errors alone will hammer a hub whose camera is simply switched
+   * off; gating retries on this field means a stopped camera produces zero reconnect
+   * traffic until it genuinely returns.
+   */
   streaming: boolean;
   /** Age of the newest frame, or null when there is none. */
   frameAgeMs: number | null;
   width: number | null;
   height: number | null;
+  /**
+   * Frames per second the hub is ACTUALLY receiving, over a recent window — not the
+   * rate the agent was configured with. The gap between the two is what makes "the
+   * feed is laggy" a measurement instead of an impression.
+   */
+  fps: number | null;
+  /** Open streams for this camera, against the hub's per-camera cap. */
+  viewers: number;
 }
+
+/**
+ * Browsers allow roughly six concurrent connections per origin over HTTP/1.1, and an
+ * MJPEG stream holds one for its entire life. Past this many open tiles, ordinary
+ * requests — the agent list, alerts, even the ticket mints — queue behind the streams
+ * and the whole dashboard appears to hang.
+ *
+ * HTTP/2 removes the limit, and Caddy negotiates it automatically on a real hostname,
+ * but not on plain `:80` locally. So the client caps itself regardless.
+ */
+export const MAX_CONCURRENT_STREAMS = 4;
 
 /**
  * A short-lived ticket for the MJPEG stream.

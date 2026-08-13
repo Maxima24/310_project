@@ -189,6 +189,39 @@ services:
     <<: *agent-common
     command: ['--type', 'camera', '--id', 'camera-lobby', '--location', 'Lobby']
 
+  # Opt-in real camera:  docker compose --profile webcam up -d
+  #
+  # LINUX ONLY. Docker Desktop on Windows and macOS runs containers in a VM with no USB
+  # passthrough, so /dev/video0 does not exist there. On those hosts run this one agent
+  # natively against the containerised hub instead:
+  #
+  #   cd agents && python run_agent.py --type camera --id camera-webcam \
+  #     --location Office --real --source 0 --stream --record-evidence
+  #
+  # Kept out of the default set deliberately: starting the stack should never switch on
+  # someone's camera.
+  agent-webcam:
+    <<: *agent-common
+    profiles: ['webcam']
+    devices:
+      - '/dev/video0:/dev/video0'
+    command:
+      - '--type'
+      - 'camera'
+      - '--id'
+      - 'camera-webcam'
+      - '--location'
+      - 'Office'
+      - '--real'
+      - '--source'
+      - '0'
+      - '--stream'
+      - '--stream-fps'
+      - '5'
+      - '--record-evidence'
+      - '--s3-endpoint'
+      - 'http://minio:9000'
+
 volumes:
   postgres-data:
   minio-data:

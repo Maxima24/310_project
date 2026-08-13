@@ -8,6 +8,8 @@ interface StoredFrame {
   receivedAt: number;
   width: number | null;
   height: number | null;
+  /** Monotonic per camera, so two frames in the same millisecond are still distinct. */
+  seq: number;
 }
 
 /**
@@ -22,6 +24,16 @@ const TICKET_TTL_MS = 30_000;
 
 /** Rejected above this. A 1080p JPEG is well under 1MB; more suggests a wrong content type. */
 export const MAX_FRAME_BYTES = 2 * 1024 * 1024;
+
+/**
+ * Concurrent viewers per camera. Each one holds a response open for as long as it
+ * watches, so without a cap a reload loop — or a dashboard left open on a wall — can
+ * pin an unbounded number of sockets against a hub that has real work to do.
+ */
+export const MAX_VIEWERS_PER_CAMERA = 4;
+
+/** Window used to measure the ACHIEVED frame rate, as opposed to the configured one. */
+const FPS_WINDOW_MS = 5_000;
 
 interface Ticket {
   agentId: string;
@@ -43,6 +55,11 @@ export class FrameStoreService {
   private readonly logger = new Logger(FrameStoreService.name);
   private readonly frames = new Map<string, StoredFrame>();
   private readonly tickets = new Map<string, Ticket>();
+  /** Arrival timestamps inside FPS_WINDOW_MS, per camera, for the measured rate. */
+  private readonly recent = new Map<string, number[]>();
+  /** Open stream responses per camera, for the viewer cap. */
+  private readonly viewers = new Map<string, number>();
+  private sequence = 0;
 
   /**
    * Wakes waiting stream responses the instant a frame lands, so the MJPEG output runs
@@ -56,9 +73,51 @@ export class FrameStoreService {
   }
 
   put(agentId: string, data: Buffer): void {
+    const now = Date.now();
     const { width, height } = readJpegSize(data);
-    this.frames.set(agentId, { data, receivedAt: Date.now(), width, height });
+
+    this.sequence += 1;
+    this.frames.set(agentId, { data, receivedAt: now, width, height, seq: this.sequence });
+
+    // Keep only arrivals inside the measurement window; this is the achieved rate, which
+    // is what makes "the feed is laggy" a number instead of an impression.
+    const stamps = this.recent.get(agentId) ?? [];
+    stamps.push(now);
+    while (stamps.length > 0 && now - stamps[0] > FPS_WINDOW_MS) stamps.shift();
+    this.recent.set(agentId, stamps);
+
     this.arrivals.emit(agentId);
+  }
+
+  /** Frames per second actually received over the recent window, or null when idle. */
+  measuredFps(agentId: string): number | null {
+    const stamps = this.recent.get(agentId);
+    if (!stamps || stamps.length < 2) return null;
+
+    const span = stamps[stamps.length - 1] - stamps[0];
+    if (span <= 0) return null;
+    return Math.round(((stamps.length - 1) / span) * 1000 * 10) / 10;
+  }
+
+  /**
+   * Claims a viewer slot, or returns false when the camera is already at capacity.
+   * The caller MUST call `releaseViewer` in a finally block, or slots leak on error.
+   */
+  claimViewer(agentId: string): boolean {
+    const current = this.viewers.get(agentId) ?? 0;
+    if (current >= MAX_VIEWERS_PER_CAMERA) return false;
+    this.viewers.set(agentId, current + 1);
+    return true;
+  }
+
+  releaseViewer(agentId: string): void {
+    const current = this.viewers.get(agentId) ?? 0;
+    if (current <= 1) this.viewers.delete(agentId);
+    else this.viewers.set(agentId, current - 1);
+  }
+
+  viewerCount(agentId: string): number {
+    return this.viewers.get(agentId) ?? 0;
   }
 
   /** Newest frame, or null when absent or stale. */
@@ -69,29 +128,64 @@ export class FrameStoreService {
     return frame;
   }
 
-  /** Waits for the next frame, or resolves null if none arrives in time. */
-  next(agentId: string, timeoutMs: number): Promise<StoredFrame | null> {
+  /**
+   * Waits for the next frame, or resolves null on timeout or abort.
+   *
+   * The abort signal matters more than it looks: without it a disconnecting viewer's
+   * loop stays parked here for up to `timeoutMs`, so its slot against the viewer cap is
+   * released that much later. Reload a tile four times quickly and you lock yourself
+   * out of your own camera for five seconds.
+   */
+  next(agentId: string, timeoutMs: number, signal?: AbortSignal): Promise<StoredFrame | null> {
     return new Promise((resolve) => {
       const done = (value: StoredFrame | null) => {
         clearTimeout(timer);
         this.arrivals.off(agentId, onFrame);
+        signal?.removeEventListener('abort', onAbort);
         resolve(value);
       };
+
       const onFrame = () => done(this.get(agentId));
+      const onAbort = () => done(null);
+
+      if (signal?.aborted) {
+        resolve(null);
+        return;
+      }
+
       const timer = setTimeout(() => done(null), timeoutMs);
       this.arrivals.once(agentId, onFrame);
+      signal?.addEventListener('abort', onAbort, { once: true });
     });
   }
 
   /** Which cameras are currently live, for the dashboard's camera list. */
-  status(agentId: string): { streaming: boolean; frameAgeMs: number | null; width: number | null; height: number | null } {
+  status(agentId: string): {
+    streaming: boolean;
+    frameAgeMs: number | null;
+    width: number | null;
+    height: number | null;
+    fps: number | null;
+    viewers: number;
+  } {
     const frame = this.get(agentId);
-    if (!frame) return { streaming: false, frameAgeMs: null, width: null, height: null };
+    if (!frame) {
+      return {
+        streaming: false,
+        frameAgeMs: null,
+        width: null,
+        height: null,
+        fps: null,
+        viewers: this.viewerCount(agentId),
+      };
+    }
     return {
       streaming: true,
       frameAgeMs: Date.now() - frame.receivedAt,
       width: frame.width,
       height: frame.height,
+      fps: this.measuredFps(agentId),
+      viewers: this.viewerCount(agentId),
     };
   }
 

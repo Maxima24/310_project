@@ -1319,6 +1319,44 @@ button {
   opacity: 0.8;
 }
 
+/* Controls sit over the picture and only appear on hover, so a wall display shows
+   video rather than chrome. */
+.camera-controls {
+  position: absolute;
+  top: var(--s2);
+  right: var(--s2);
+  display: flex;
+  gap: 4px;
+  padding: 3px;
+  border-radius: var(--r);
+  background: rgba(6, 10, 16, 0.72);
+  backdrop-filter: blur(6px);
+  opacity: 0;
+  transition: opacity var(--fast);
+}
+
+.camera:hover .camera-controls,
+.camera-controls:focus-within {
+  opacity: 1;
+}
+
+.camera-controls .icon-btn {
+  width: 28px;
+  height: 28px;
+  color: #dbe4f0;
+}
+
+.camera-controls .icon-btn:hover {
+  background: rgba(255, 255, 255, 0.12);
+  color: #fff;
+}
+
+.camera-note {
+  margin: 0 var(--s4) var(--s3);
+  font-size: var(--text-xs);
+  color: var(--text-3);
+}
+
 .camera-meta {
   display: flex;
   align-items: center;

@@ -9,6 +9,9 @@ import {
   Controller,
   ForbiddenException,
   Get,
+  HttpException,
+  HttpStatus,
+  Logger,
   NotFoundException,
   Param,
   Post,
@@ -23,13 +26,28 @@ import type { AuthenticatedRequest } from '../common/guards/auth.guard';
 import { RequirePermissions } from '../common/guards/permissions.decorator';
 import { Public } from '../common/guards/public.decorator';
 import { PolicyService } from '../common/security/policy.service';
-import { FrameStoreService, MAX_FRAME_BYTES } from './frame-store.service';
+import {
+  FrameStoreService,
+  MAX_FRAME_BYTES,
+  MAX_VIEWERS_PER_CAMERA,
+} from './frame-store.service';
 
-/** How long a stream waits for a frame before sending a keep-alive comment. */
+/** How long the loop waits for a new frame before re-sending the last one. */
 const FRAME_WAIT_MS = 5_000;
+
+/**
+ * How long a stream tolerates a camera producing NOTHING before closing.
+ *
+ * Longer than FRAME_TTL_MS so a brief stall re-sends the last frame rather than
+ * dropping the viewer, but short enough that a stopped camera does not hold a socket
+ * open indefinitely.
+ */
+const STREAM_IDLE_TIMEOUT_MS = 60_000;
 
 @Controller('cameras')
 export class CamerasController {
+  private readonly logger = new Logger(CamerasController.name);
+
   constructor(
     private readonly frames: FrameStoreService,
     private readonly agents: AgentsService,
@@ -136,6 +154,15 @@ export class CamerasController {
       throw new ForbiddenException('Missing, expired, or already-used stream ticket');
     }
 
+    // Each viewer holds this response open for as long as they watch, so capacity is
+    // finite and has to be claimed rather than assumed.
+    if (!this.frames.claimViewer(id)) {
+      throw new HttpException(
+        `Camera ${id} already has the maximum ${MAX_VIEWERS_PER_CAMERA} viewers`,
+        HttpStatus.TOO_MANY_REQUESTS,
+      );
+    }
+
     response.writeHead(200, {
       'Content-Type': `multipart/x-mixed-replace; boundary=${MJPEG_BOUNDARY}`,
       'Cache-Control': 'no-store, no-transform',
@@ -146,37 +173,66 @@ export class CamerasController {
     });
 
     let open = true;
+    // Aborting wakes the pending frame wait immediately, so a disconnecting viewer
+    // gives its slot back at once rather than up to FRAME_WAIT_MS later.
+    const disconnected = new AbortController();
     const close = () => {
       open = false;
+      disconnected.abort();
     };
     response.on('close', close);
     response.on('error', close);
 
-    // Send whatever is already buffered, so the picture appears immediately rather
-    // than after the camera's next frame interval.
-    const first = this.frames.get(id);
-    if (first) this.writePart(response, first.data);
+    try {
+      // Send whatever is already buffered, so the picture appears immediately rather
+      // than after the camera's next frame interval.
+      const first = this.frames.get(id);
+      if (first) this.writePart(response, first.data);
 
-    let lastSent = first?.receivedAt ?? 0;
+      // Sequence, not timestamp: two frames arriving in the same millisecond are
+      // distinct, and comparing receivedAt silently dropped one of them.
+      let lastSeq = first?.seq ?? 0;
+      let silentSince = Date.now();
 
-    while (open) {
-      const frame = await this.frames.next(id, FRAME_WAIT_MS);
+      while (open) {
+        const frame = await this.frames.next(id, FRAME_WAIT_MS, disconnected.signal);
+        if (!open) break;
 
-      if (!open) break;
+        if (frame && frame.seq !== lastSeq) {
+          lastSeq = frame.seq;
+          silentSince = Date.now();
+          this.writePart(response, frame.data);
+          continue;
+        }
 
-      if (!frame) {
-        // Nothing arrived. A comment line keeps the connection alive without pretending
-        // there is a picture, so a camera that pauses does not look like a dead socket.
-        response.write(`\r\n--${MJPEG_BOUNDARY}\r\nContent-Type: text/plain\r\n\r\n\r\n`);
-        continue;
+        // Nothing new arrived.
+        //
+        // This branch previously wrote a `Content-Type: text/plain` part, which is a
+        // defect: an <img> consuming multipart/x-mixed-replace tries to decode every
+        // part as an image, fails on text, and fires onerror — so a camera that merely
+        // paused for five seconds killed the view permanently. Re-sending the last
+        // frame is what IP cameras do: it is a valid image part, it keeps proxies from
+        // timing the connection out, and the picture stays truthful because a frame
+        // older than FRAME_TTL_MS is not returned at all.
+        const last = this.frames.get(id);
+        if (last) {
+          this.writePart(response, last.data);
+          continue;
+        }
+
+        // Genuinely silent. Ending cleanly lets the client tell "this camera stopped"
+        // apart from "the network broke", which decides whether reconnecting can help.
+        if (Date.now() - silentSince > STREAM_IDLE_TIMEOUT_MS) {
+          this.logger.log(`Closing idle stream for ${id} — no frames for ${STREAM_IDLE_TIMEOUT_MS}ms`);
+          break;
+        }
       }
-
-      if (frame.receivedAt === lastSent) continue;
-      lastSent = frame.receivedAt;
-      this.writePart(response, frame.data);
+    } finally {
+      // Must run even if the socket errors, or the camera leaks a viewer slot and
+      // eventually refuses everyone.
+      this.frames.releaseViewer(id);
+      response.end();
     }
-
-    response.end();
   }
 
   private writePart(response: Response, data: Buffer): void {
