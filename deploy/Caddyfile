@@ -1,0 +1,77 @@
+# Reverse proxy and static host for the security hub.
+#
+# One file serves both shapes, chosen by SITE_ADDRESS:
+#
+#   SITE_ADDRESS=:80                 -> plain HTTP on localhost, no certificate friction
+#   SITE_ADDRESS=hub.example.com     -> automatic HTTPS via Let's Encrypt
+#   SITE_ADDRESS=https://hub.example.com, https://www.hub.example.com  -> several names
+#
+# Caddy provisions and renews certificates itself when the address is a real hostname,
+# which is the whole reason for putting it in front rather than nginx.
+#
+# Everything is served from ONE origin: the dashboard at /, the hub under /api, and the
+# WebSocket at /socket.io. That removes CORS entirely and keeps the operator credential
+# same-site — a split-origin deployment (see render.yaml) has to loosen both.
+{
+	# Where Let's Encrypt sends expiry warnings. Ignored for local (:80) addresses.
+	email {$ACME_EMAIL:admin@example.com}
+
+	# Uncomment while testing certificate issuance — the staging endpoint has far
+	# higher rate limits, so a misconfigured domain cannot get you blocked for a week.
+	# acme_ca https://acme-staging-v02.api.letsencrypt.org/directory
+}
+
+{$SITE_ADDRESS::80} {
+	log {
+		output stdout
+		format console
+	}
+
+	# Compress before it leaves the proxy. The event feed is JSON and compresses well.
+	encode zstd gzip
+
+	# --- WebSocket -----------------------------------------------------------
+	# Must come BEFORE the /api rule and must NOT strip its prefix: socket.io needs
+	# the path intact, and Caddy passes Upgrade/Connection headers through for
+	# handle_path/reverse_proxy automatically.
+	handle /socket.io/* {
+		reverse_proxy hub:3000
+	}
+
+	# --- REST API ------------------------------------------------------------
+	# handle_path strips the matched prefix, so /api/agents reaches the hub as
+	# /agents. The dashboard's default VITE_API_BASE of "/api" relies on exactly this,
+	# as does the Vite dev proxy, so the two behave identically.
+	handle_path /api/* {
+		reverse_proxy hub:3000 {
+			# Without these the hub logs every request as coming from the proxy, which
+			# makes the guard's rejection warnings useless for tracing an attacker.
+			header_up X-Real-IP {remote_host}
+			header_up X-Forwarded-Proto {scheme}
+		}
+	}
+
+	# --- Dashboard -----------------------------------------------------------
+	handle {
+		root * /srv
+		# Hashed asset filenames are immutable, so they can be cached hard. index.html
+		# must not be, or a deploy leaves browsers pinned to a stale bundle that
+		# references assets which no longer exist.
+		@assets path /assets/*
+		header @assets Cache-Control "public, max-age=31536000, immutable"
+		header /index.html Cache-Control "no-cache"
+
+		# Single-page app: unknown paths are client-side routes, not 404s.
+		try_files {path} /index.html
+		file_server
+	}
+
+	# Sensible defaults for a security console. HSTS is deliberately omitted here —
+	# it is only meaningful on HTTPS and would strand a local :80 setup.
+	header {
+		X-Content-Type-Options nosniff
+		X-Frame-Options DENY
+		Referrer-Policy no-referrer
+		-Server
+	}
+}

@@ -1,0 +1,136 @@
+# Render Blueprint — https://render.com/docs/blueprint-spec
+#
+#   Render Dashboard -> New -> Blueprint -> point at this repo.
+#
+# Declares the three pieces Render can host well: the hub (Docker web service), the
+# dashboard (static site), and managed Postgres.
+#
+# What is deliberately NOT here, and why:
+#
+#   MQTT   — Render has no managed broker. The agents' default HTTP transport works
+#            unchanged over the public URL. If you want MQTT, point agents at a hosted
+#            broker (HiveMQ, EMQX) and set MQTT_URL on the hub.
+#   MinIO  — likewise no object storage. Video evidence should use real S3: point the
+#            camera agent's --s3-endpoint at AWS and give it credentials.
+#   Agents — they read physical sensors, so they belong where the hardware is, not in a
+#            datacentre. Run them on-prem with `--hub https://<your-hub>.onrender.com`.
+#
+# This is a SPLIT-ORIGIN deployment: the dashboard and hub get different hostnames, so
+# unlike the Caddy setup there is real CORS, and the dashboard is built with absolute
+# URLs baked in. Both are handled below.
+
+databases:
+  - name: security-db
+    databaseName: security
+    user: security
+    # Free tier expires after 30 days — fine for a demo, and a loud enough failure that
+    # nobody mistakes it for production. Raise to `starter` or above for anything real.
+    plan: free
+
+services:
+  # ---------------------------------------------------------------- hub
+  - type: web
+    name: security-hub
+    runtime: docker
+    plan: free
+    # Build context is the repo ROOT: the hub depends on @cpe310/contracts via
+    # `workspace:*`, so pnpm needs the workspace manifest and that package's source.
+    dockerfilePath: ./hub/Dockerfile
+    dockerContext: .
+    # Returns 503 when Postgres is unreachable, so Render will not route traffic to a
+    # hub that cannot actually ingest or alert.
+    healthCheckPath: /health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      # Render supplies PORT and expects the service to bind it; main.ts already reads it.
+      - key: DATABASE_URL
+        fromDatabase:
+          name: security-db
+          property: connectionString
+
+      # --- Credentials -----------------------------------------------------
+      # generateValue makes Render mint a random secret per environment and keep it out
+      # of the repo. Read them from the Render dashboard to configure agents and to sign
+      # in — they are NOT the dev-*-change-me samples, and NODE_ENV=production makes the
+      # hub refuse to start if you paste those in.
+      - key: AGENT_BOOTSTRAP_KEY
+        generateValue: true
+      - key: OPERATOR_KEY
+        generateValue: true
+      - key: ADMIN_KEY
+        generateValue: true
+      # Optional read-only role. Leave VIEWER_ZONES empty for the whole site, or set it
+      # to a comma-separated list of agent locations.
+      - key: VIEWER_KEY
+        generateValue: true
+      - key: VIEWER_ZONES
+        value: ''
+
+      # --- Cross-origin ----------------------------------------------------
+      # The dashboard is on a different hostname here, so the WebSocket gateway must
+      # accept it explicitly. `*` would also work but would let any site open an
+      # authenticated feed if it ever obtained a credential.
+      - key: CORS_ORIGIN
+        fromService:
+          name: security-dashboard
+          type: web
+          property: host
+        # NOTE: this yields a bare hostname. If the gateway rejects the origin, set this
+        # manually to the full https://<host> in the Render dashboard.
+
+      # --- Tuning ----------------------------------------------------------
+      - key: HEARTBEAT_INTERVAL_MS
+        value: '10000'
+      - key: HEARTBEAT_TIMEOUT_MS
+        value: '30000'
+      - key: ALERT_COOLDOWN_MS
+        value: '60000'
+
+      # --- Notifications ---------------------------------------------------
+      # Unset by default, so both channels stay inert and only the log channel runs.
+      # Add SMTP_HOST/SMTP_PORT/SMTP_USER/SMTP_PASS and ALERT_EMAIL_TO for email, or
+      # ALERT_WEBHOOK_URL for a webhook, in the Render dashboard.
+      - key: ALERT_EMAIL_FROM
+        value: security-hub@example.com
+
+  # ---------------------------------------------------------------- dashboard
+  - type: web
+    name: security-dashboard
+    runtime: static
+    # corepack reads `packageManager` from package.json, so the pnpm version matches the
+    # lockfile exactly and Render's preinstalled pnpm (whatever version that is) cannot
+    # cause an ERR_PNPM_LOCKFILE_BREAKING_CHANGE. Node comes from .node-version.
+    #
+    # VITE_API_BASE is composed here rather than in envVars because Render cannot
+    # concatenate a scheme onto a `fromService` host, and Vite bakes these in at BUILD
+    # time — a built bundle cannot be repointed later without rebuilding.
+    buildCommand: |
+      corepack enable
+      pnpm install --frozen-lockfile
+      VITE_API_BASE="https://$HUB_HOST" VITE_WS_URL="https://$HUB_HOST" \
+        pnpm --filter dashboard build
+    staticPublishPath: ./dashboard/dist
+    envVars:
+      - key: HUB_HOST
+        fromService:
+          name: security-hub
+          type: web
+          property: host
+    routes:
+      # Single-page app: unknown paths are client-side routes, not 404s.
+      - type: rewrite
+        source: /*
+        destination: /index.html
+    headers:
+      - path: /*
+        name: X-Frame-Options
+        value: DENY
+      - path: /*
+        name: X-Content-Type-Options
+        value: nosniff
+      # Hashed filenames are immutable; index.html must not be cached or a deploy
+      # strands browsers on a stale bundle referencing assets that no longer exist.
+      - path: /assets/*
+        name: Cache-Control
+        value: public, max-age=31536000, immutable

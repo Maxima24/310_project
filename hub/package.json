@@ -4,13 +4,15 @@
   "private": true,
   "description": "Central hub: agent registry, event ingestion, alert engine, WebSocket feed",
   "scripts": {
-    "build": "nest build",
+    "//generate": "The Prisma client is GENERATED, not committed — hub/src imports types from it, so nothing here compiles until it exists. Every task that reads those types therefore generates first, or a fresh clone fails with '@prisma/client did not initialize yet'. `prisma generate` needs no DATABASE_URL and is idempotent, so the cost is ~1s and the repo builds from a clean checkout on any package manager.",
+    "generate": "prisma generate",
+    "build": "prisma generate && nest build",
     "start": "node dist/main.js",
-    "start:dev": "nest start --watch",
-    "dev": "nest start --watch",
-    "test": "jest",
+    "start:dev": "prisma generate && nest start --watch",
+    "dev": "prisma generate && nest start --watch",
+    "test": "prisma generate && jest",
     "test:watch": "jest --watch",
-    "lint": "tsc -p tsconfig.json --noEmit",
+    "lint": "prisma generate && tsc -p tsconfig.json --noEmit",
     "db:seed": "prisma db seed"
   },
   "prisma": {

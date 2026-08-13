@@ -22,6 +22,8 @@ agents/              Python collector agents (motion, door, camera)
 dashboard/           React + Vite operator dashboard
 packages/contracts/  Wire types, permissions, and role map shared by all three — source of truth
 packages/tsconfig/   Shared TypeScript base config
+deploy/Caddyfile     Reverse proxy: serves the dashboard, proxies the hub, automatic HTTPS
+render.yaml          Render blueprint: hub + dashboard + managed Postgres
 tools/ws-client.mjs  Socket.io observer for watching the live feed from a terminal
 ```
 
@@ -111,6 +113,86 @@ python run_agent.py --type door   --id door-front     --location "Front door" --
 # bash / zsh
 export AGENT_BOOTSTRAP_KEY=dev-bootstrap-key-change-me
 ```
+
+---
+
+## Toolchain
+
+Pinned deliberately, because a mismatched build machine fails in ways that do not name
+their cause:
+
+| Pin | Where | Why |
+|---|---|---|
+| Node 22 | `.nvmrc`, `.node-version`, both Dockerfiles | Active LTS, and the version hosted pipelines support most reliably. Keeping Docker, CI, and local dev on one major avoids "works in the container, fails in the pipeline" |
+| pnpm from `packageManager` | root `package.json` | The Dockerfiles run bare `corepack enable` with **no** version argument, so corepack reads the manifest. The version lives in exactly one place |
+| `engines` + `engine-strict` | `package.json`, `.npmrc` | The lockfile is `lockfileVersion: 9.0`, which **pnpm 8 cannot read**. Failing at install with a clear message beats `ERR_PNPM_LOCKFILE_BREAKING_CHANGE` halfway through CI |
+| `pnpm.onlyBuiltDependencies` | root `package.json` | pnpm 10 blocks dependency install scripts by default. Without the allowlist, `@prisma/engines` is skipped and the build dies later with a confusing error |
+
+**The Prisma client is generated, not committed.** `hub/src` imports types from it, so
+nothing compiles until it exists — which is why `build`, `test`, `lint`, and `dev` all
+run `prisma generate` first. It needs no `DATABASE_URL` and is idempotent, so the cost
+is about a second and a clean checkout builds on any machine. Verified against a fresh
+clone on **pnpm 10** with no `.env`: 3/3 build tasks, 200/200 tests.
+
+> Building on a machine with a different pnpm? Use `corepack enable` and let it read
+> `packageManager`. Installing pnpm globally (`npm i -g pnpm`) bypasses the pin and is
+> the usual cause of lockfile complaints.
+
+---
+
+## Deployment
+
+### Behind Caddy (Docker)
+
+An overlay that puts the dashboard and hub on **one origin** with automatic HTTPS. The
+plain development workflow is untouched — this is opt-in.
+
+```bash
+# Local, plain HTTP on http://localhost:8080
+docker compose -f docker-compose.yml -f docker-compose.caddy.yml up --build
+
+# A real domain, certificates provisioned automatically
+SITE_ADDRESS=hub.example.com ACME_EMAIL=you@example.com \
+  docker compose -f docker-compose.yml -f docker-compose.caddy.yml up --build -d
+```
+
+| Path | Goes to |
+|---|---|
+| `/` | The built dashboard (static files, served by Caddy) |
+| `/api/*` | `hub:3000`, prefix stripped — `/api/agents` arrives as `/agents` |
+| `/socket.io/*` | `hub:3000`, prefix **kept** — socket.io needs the path intact |
+
+Single-origin is the better arrangement: no CORS, and the operator credential is never
+sent cross-site. Config lives in [deploy/Caddyfile](deploy/Caddyfile).
+
+> The base compose file still publishes the hub on `3000`, and compose **merges** port
+> lists rather than replacing them, so the hub stays directly reachable even behind the
+> proxy. Convenient locally, wrong in production — there, add a third overlay setting
+> the hub's `ports: []` so Caddy is genuinely the only entrance.
+
+### Render
+
+[render.yaml](render.yaml) declares a Docker web service for the hub, a static site for
+the dashboard, and managed Postgres. Point a Render Blueprint at the repo.
+
+Credentials use `generateValue`, so Render mints random secrets per environment and
+nothing sensitive lives in the repo — read them from the Render dashboard to configure
+agents and to sign in. `NODE_ENV=production` means the hub refuses to start if a sample
+key is pasted in.
+
+**This is a split-origin deployment**, unlike Caddy: the dashboard and hub get different
+hostnames, so CORS is real and the dashboard is built with absolute URLs baked in
+(`VITE_API_BASE` / `VITE_WS_URL` — see [dashboard/src/lib/config.ts](dashboard/src/lib/config.ts)).
+Vite substitutes these at **build** time, so repointing a built bundle means rebuilding.
+
+Not on Render, and deliberately so:
+
+- **MQTT** — no managed broker. The agents' default HTTP transport works unchanged over
+  the public URL; for MQTT, use a hosted broker and set `MQTT_URL` on the hub.
+- **Object storage** — no MinIO. Video evidence should use real S3: point the camera
+  agent's `--s3-endpoint` at AWS.
+- **Agents** — they read physical sensors, so they belong where the hardware is. Run
+  them on-prem with `--hub https://<your-hub>.onrender.com`.
 
 ---
 

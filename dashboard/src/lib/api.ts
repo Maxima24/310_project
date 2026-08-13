@@ -11,6 +11,7 @@ import type {
 } from '@cpe310/contracts';
 
 import { currentCredential } from '../stores/session.store';
+import { API_BASE } from './config';
 
 /**
  * Hub client.
@@ -47,7 +48,7 @@ export class ApiError extends Error {
 }
 
 async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
-  const response = await fetch(`/api${path}`, {
+  const response = await fetch(`${API_BASE}${path}`, {
     ...init,
     headers: {
       'Content-Type': 'application/json',

@@ -13,6 +13,7 @@ import { useEffect, useRef } from 'react';
 import { io, type Socket } from 'socket.io-client';
 
 import { useSessionStore } from '../stores/session.store';
+import { WS_URL } from './config';
 import { CACHE_LIMITS, qk, upsertAlert } from './queries';
 
 /**
@@ -38,7 +39,7 @@ export function useHubSocket(credential: string, enabled: boolean): void {
 
     setConnection('connecting');
 
-    const socket = io('/', {
+    const socket = io(WS_URL, {
       // The shape the gateway checks. It requires a credential holding alerts:read, so
       // an agent token is refused.
       auth: { key: credential },

@@ -1,0 +1,62 @@
+# Caddy overlay: puts the dashboard and the hub behind one origin with automatic HTTPS.
+#
+#   # local, plain HTTP on http://localhost:8080
+#   docker compose -f docker-compose.yml -f docker-compose.caddy.yml up --build
+#
+#   # a real domain, with certificates provisioned automatically
+#   SITE_ADDRESS=hub.example.com ACME_EMAIL=you@example.com \
+#     docker compose -f docker-compose.yml -f docker-compose.caddy.yml up --build -d
+#
+# Kept separate from docker-compose.yml so the plain development workflow stays exactly
+# as it was — this is opt-in, not a change to the default.
+#
+# NOTE: the base file still publishes the hub on ${HUB_PORT:-3000}, and compose MERGES
+# port lists rather than replacing them, so the hub remains directly reachable even with
+# this overlay. That is convenient locally and wrong in production: there, run the hub
+# with `ports: []` via a third overlay, or bind it to 127.0.0.1 only, so the proxy is
+# genuinely the sole entrance.
+
+services:
+  web:
+    build:
+      context: .
+      dockerfile: ./dashboard/Dockerfile
+      args:
+        # Empty on purpose: same-origin defaults apply, because Caddy serves the SPA
+        # and proxies /api and /socket.io to the hub itself.
+        VITE_API_BASE: ''
+        VITE_WS_URL: ''
+    image: cpe310-web:latest
+    restart: unless-stopped
+    environment:
+      # `:80` keeps Caddy on plain HTTP, which is what you want on a laptop —
+      # Let's Encrypt cannot validate localhost. Set a hostname to switch on HTTPS.
+      #
+      # `${VAR:-default}` is compose's syntax; the default value here happens to be
+      # `:80`, which is why it reads awkwardly. Caddy's own `{$VAR:default}` form uses a
+      # single colon and is NOT valid here.
+      SITE_ADDRESS: ${SITE_ADDRESS:-:80}
+      ACME_EMAIL: ${ACME_EMAIL:-admin@example.com}
+    ports:
+      - '${WEB_HTTP_PORT:-8080}:80'
+      - '${WEB_HTTPS_PORT:-8443}:443'
+      - '${WEB_HTTPS_PORT:-8443}:443/udp'
+    volumes:
+      # Certificates and ACME account keys. Without this every restart re-requests
+      # certificates, which hits Let's Encrypt rate limits quickly.
+      - caddy-data:/data
+      # Caddy's own generated config cache.
+      - caddy-config:/config
+    depends_on:
+      hub:
+        condition: service_healthy
+
+  hub:
+    environment:
+      # The dashboard is same-origin behind Caddy, so the WebSocket gateway does not
+      # need a permissive CORS list. Narrow it further if you expose the hub directly.
+      CORS_ORIGIN: ${CORS_ORIGIN:-*}
+
+volumes:
+  caddy-data:
+  caddy-config:

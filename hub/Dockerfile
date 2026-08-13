@@ -5,8 +5,16 @@
 #   docker build -f hub/Dockerfile -t cpe310-hub .
 
 # ---------------------------------------------------------------- deps
-FROM node:24-alpine AS deps
-RUN corepack enable && corepack prepare pnpm@9.15.9 --activate
+# Node 22 (active LTS) rather than the newest release: it is what .nvmrc and
+# .node-version pin, and what hosted build pipelines support most reliably. Keeping
+# Docker, CI, and local dev on one major avoids "works in the container, fails in the
+# pipeline".
+FROM node:22-alpine AS deps
+
+# `corepack enable` alone, with NO version argument: corepack then reads
+# `packageManager` from package.json, so the pnpm version lives in exactly one place.
+# Hardcoding it here as well meant this file silently drifted from the manifest.
+RUN corepack enable
 WORKDIR /repo
 
 # Manifests only, so a source-only change reuses this layer.
@@ -35,7 +43,7 @@ RUN pnpm --filter hub exec prisma generate \
 RUN pnpm --filter hub --prod deploy /deploy
 
 # ---------------------------------------------------------------- runtime
-FROM node:24-alpine AS runtime
+FROM node:22-alpine AS runtime
 ENV NODE_ENV=production
 WORKDIR /app
 
@@ -58,8 +66,10 @@ COPY --chmod=0755 hub/docker-entrypoint.sh ./docker-entrypoint.sh
 # engine written during the build stage — so without this the hub dies at boot with
 # "@prisma/client did not initialize yet".
 #
-# DATABASE_URL is supplied inline only to satisfy the schema's datasource block;
-# generate never connects, and the placeholder does not persist into the image env.
+# Verified on Prisma 6.19.3: `generate` needs no DATABASE_URL — it reads the schema and
+# never connects. The placeholder is kept only so a future Prisma that does demand the
+# variable fails loudly at build time rather than at container start; it does not
+# persist into the image environment.
 RUN DATABASE_URL=postgresql://placeholder:placeholder@localhost:5432/placeholder \
   prisma generate --schema=./prisma/schema.prisma
 
