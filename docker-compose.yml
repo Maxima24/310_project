@@ -59,15 +59,26 @@ services:
     ports:
       - '${HUB_PORT:-3000}:3000'
     environment:
-      # This stack is a local demo harness, so it defaults to `development` and
-      # the sample key works out of the box. The hub REFUSES to start when
-      # NODE_ENV=production while AGENT_API_KEY is still `dev-key-change-me` — so
-      # a real deployment must set both together:
-      #   NODE_ENV=production AGENT_API_KEY=<a real secret> docker compose up
+      # This stack is a local demo harness, so it defaults to `development` and the
+      # sample keys work out of the box. The hub REFUSES to start when
+      # NODE_ENV=production while any credential is still a sample value, so a real
+      # deployment must set them together:
+      #   NODE_ENV=production AGENT_BOOTSTRAP_KEY=... OPERATOR_KEY=... docker compose up
       NODE_ENV: ${NODE_ENV:-development}
       PORT: 3000
+      # Enrollment only — this is what the agents get.
       AGENT_BOOTSTRAP_KEY: ${AGENT_BOOTSTRAP_KEY:-dev-bootstrap-key-change-me}
+      # Day-to-day operator: acknowledge, arm, disarm, read history.
       OPERATOR_KEY: ${OPERATOR_KEY:-dev-operator-key-change-me}
+      # Optional human roles. Passed through so the dashboard can demonstrate all three
+      # without editing this file; omit them in a deployment that has no use for them.
+      VIEWER_KEY: ${VIEWER_KEY:-dev-viewer-key-change-me}
+      # Comma-separated agent locations the viewer may see. Empty = the whole building.
+      # Set e.g. VIEWER_ZONES=Hallway to watch the zone filtering take effect.
+      VIEWER_ZONES: ${VIEWER_ZONES:-}
+      # Adds the notification audit and the override for disarming during an
+      # unacknowledged critical alert.
+      ADMIN_KEY: ${ADMIN_KEY:-dev-admin-key-change-me}
       DATABASE_URL: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${POSTGRES_DB:-security}?schema=public
       HEARTBEAT_INTERVAL_MS: ${HEARTBEAT_INTERVAL_MS:-10000}
       HEARTBEAT_TIMEOUT_MS: ${HEARTBEAT_TIMEOUT_MS:-30000}

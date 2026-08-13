@@ -60,6 +60,34 @@ Sign in with `OPERATOR_KEY` from your `.env`.
 > 5432 and pointing the hub at the wrong server surfaces as a confusing authentication failure.
 > Containers reach it as `postgres:5432` internally either way.
 
+### If the hub or an agent container fails to start
+
+**Use `--build`.** Plain `docker compose up` reuses cached images, so after pulling changes you get old
+code against a new database and config. The failures look unrelated to the cause:
+
+| Symptom | Cause |
+|---|---|
+| `dependency failed to start: container ...hub-1 is unhealthy`, and the hub log says `AGENT_API_KEY is required` | Stale hub image from before the credential split. `AGENT_API_KEY` no longer exists |
+| Hub log reports fewer migrations than `hub/prisma/migrations` contains | Same — stale image |
+| An agent restart-loops with `unrecognized arguments: --transport` | Stale agent image from before the MQTT transport |
+
+```bash
+docker compose build            # rebuild BOTH images, not just the hub
+docker compose up -d
+```
+
+Then check it is actually working rather than merely running — `Up` only means the process started:
+
+```powershell
+docker compose ps -a            # nothing should say "Restarting"
+Invoke-RestMethod 'http://localhost:3000/agents' -Headers @{ 'Authorization' = 'Bearer dev-operator-key-change-me' } |
+  Format-Table id, status, secondsSinceLastSeen   # all online, seen seconds ago
+```
+
+A fatal misconfiguration in an agent shows as `Restarting` rather than `Exited`, because
+`restart: unless-stopped` keeps retrying something a restart cannot fix. `docker compose logs <service>`
+is the fastest way to see the real error.
+
 ### Running natively instead
 
 ```bash
