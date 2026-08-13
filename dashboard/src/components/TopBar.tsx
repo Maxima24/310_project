@@ -17,8 +17,12 @@ const NAV: Array<{ id: string; icon: IconName; label: string; ready: boolean }> 
   { id: 'settings', icon: 'settings', label: 'Settings', ready: false },
 ];
 
-const CONNECTION_TONE: Record<string, string> = {
-  live: 'ok',
+/**
+ * Live is the expected state, so it stays neutral — a green badge that is green 99%
+ * of the time is furniture. Only a degraded or refused feed spends colour.
+ */
+const CONNECTION_TONE: Record<string, 'idle' | 'warn' | 'critical'> = {
+  live: 'idle',
   connecting: 'warn',
   offline: 'warn',
   rejected: 'critical',
@@ -66,9 +70,14 @@ export function TopBar({ onRefresh }: { onRefresh: () => void }) {
 
       <div className="topbar-right">
         {/* The feed's health belongs in the chrome: if it is down, everything below is
-            stale, and that matters more than any single panel. */}
-        <span className={`pill pill-${tone}`} title={`Live feed: ${connection}`}>
-          <span className="pill-dot" />
+            stale, and that matters more than any single panel. Green when healthy is
+            the exception to the colour rule — a live indicator that never shows life
+            is not an indicator. */}
+        <span
+          className={`status status-${connection === 'live' ? 'ok' : tone}`}
+          title={`Live feed: ${connection}`}
+        >
+          <span className="status-dot" />
           {CONNECTION_LABEL[connection] ?? connection}
         </span>
 

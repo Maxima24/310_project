@@ -92,15 +92,18 @@ export function Dashboard() {
         <ModeControl mode={mode.data ?? null} alerts={allAlerts} />
 
         <div className="stat-row">
+          {/* Deltas stay neutral unless something is genuinely wrong. The bar under
+              "Agents" carries the healthy/offline split in shape, so it does not need
+              to be repeated as a coloured word. */}
           {canReadAgents && (
             <Stat
               label="Agents"
               icon="signal"
               value={allAgents.length}
-              delta={offline > 0 ? `${offline} offline` : 'all online'}
-              deltaTone={offline > 0 ? 'critical' : 'ok'}
+              delta={offline > 0 ? `${offline} offline` : `${online} online`}
+              deltaTone={offline > 0 ? 'critical' : 'idle'}
               bar={[
-                { value: online, tone: 'ok' },
+                { value: online, tone: 'idle' },
                 { value: offline, tone: 'critical' },
               ]}
             />
@@ -111,7 +114,6 @@ export function Dashboard() {
               icon="bell"
               value={unacknowledged.length}
               delta={`${allAlerts.length} total`}
-              deltaTone="idle"
             />
           )}
           {canReadAlerts && (
@@ -119,8 +121,8 @@ export function Dashboard() {
               label="Critical"
               icon="alert"
               value={critical.length}
-              delta={critical.length > 0 ? 'action needed' : 'clear'}
-              deltaTone={critical.length > 0 ? 'critical' : 'ok'}
+              delta={critical.length > 0 ? 'action needed' : undefined}
+              deltaTone="critical"
             />
           )}
           {canReadEvents && (
@@ -130,10 +132,8 @@ export function Dashboard() {
             label="Arm state"
             icon="shield"
             value={<span style={{ textTransform: 'capitalize' }}>{mode.data?.mode ?? '—'}</span>}
-            delta={mode.data?.mode === 'away' ? 'armed' : mode.data?.mode === 'home' ? 'partial' : 'off'}
-            deltaTone={
-              mode.data?.mode === 'away' ? 'critical' : mode.data?.mode === 'home' ? 'warn' : 'idle'
-            }
+            delta={mode.data?.mode === 'disarmed' ? 'not armed' : undefined}
+            deltaTone="warn"
           />
         </div>
 

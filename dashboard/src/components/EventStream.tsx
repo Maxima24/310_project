@@ -1,18 +1,19 @@
 import type { EventView } from '@cpe310/contracts';
 
-import { Empty, Icon, Pill, type Tone } from './ui';
+import { Empty, Icon } from './ui';
 
 /**
  * Live event log, with a link to video evidence when a camera attached one.
+ *
+ * Deliberately monochrome. This is the highest-volume surface on the page — dozens of
+ * rows a minute — and an earlier version put a coloured pill on every one of them,
+ * which made the whole panel shimmer and told the reader nothing. Events are FACTS,
+ * not judgements; whether one mattered is the alert panel's job to say.
+ *
+ * The only ink spent here is a faint marker on the event types that can actually
+ * trigger an alarm, so the log can still be skimmed for activity.
  */
-
-/** Events that mean something happened get colour; the rest stay quiet. */
-const EVENT_TONE: Record<string, Tone> = {
-  motion_detected: 'warn',
-  camera_motion: 'warn',
-  door_opened: 'warn',
-  door_closed: 'idle',
-};
+const NOTABLE = new Set(['motion_detected', 'camera_motion', 'door_opened']);
 
 export function EventStream({ events, loading }: { events: EventView[]; loading: boolean }) {
   if (loading) return <Empty icon="chart">Loading events…</Empty>;
@@ -30,7 +31,9 @@ export function EventStream({ events, loading }: { events: EventView[]; loading:
             })}
           </time>
 
-          <Pill tone={EVENT_TONE[event.type] ?? 'idle'}>{event.type.replace(/_/g, ' ')}</Pill>
+          <span className={`event-type ${NOTABLE.has(event.type) ? 'event-notable' : ''}`}>
+            {event.type.replace(/_/g, ' ')}
+          </span>
 
           <span className="event-agent truncate">{event.agentId}</span>
 

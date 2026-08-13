@@ -5,7 +5,7 @@ import {
   type SystemModeResponse,
 } from '@cpe310/contracts';
 
-import { Icon, Pill } from './ui';
+import { Icon, Pill, Status } from './ui';
 import { ApiError } from '../lib/api';
 import { evaluateModeChange, usePermissions } from '../lib/permissions';
 import { useSetMode } from '../lib/queries';
@@ -74,18 +74,17 @@ export function ModeControl({
       )}
 
       <div className="command-meta">
+        {/* A filled pill only for the one state that must carry across a room. An
+            "all clear" badge shouted as loudly as an active intrusion is how a
+            console trains people to ignore it. */}
         {openCritical.length > 0 ? (
           <Pill tone="critical" dot>
             {openCritical.length} critical
           </Pill>
         ) : unacknowledged.length > 0 ? (
-          <Pill tone="warn" dot>
-            {unacknowledged.length} open
-          </Pill>
+          <Status tone="warn">{unacknowledged.length} open</Status>
         ) : (
-          <Pill tone="ok" dot>
-            All clear
-          </Pill>
+          <Status>All clear</Status>
         )}
       </div>
 

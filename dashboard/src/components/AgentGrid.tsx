@@ -1,6 +1,6 @@
 import type { AgentView } from '@cpe310/contracts';
 
-import { Empty, Icon, Pill, type IconName } from './ui';
+import { Empty, Icon, Status, type IconName } from './ui';
 import { useUiStore } from '../stores/ui.store';
 
 const TYPE_ICON: Record<string, IconName> = {
@@ -65,14 +65,21 @@ export function AgentGrid({ agents, loading }: { agents: AgentView[]; loading: b
               </span>
 
               <span className="agent-right">
-                <Pill tone={agent.status === 'online' ? 'ok' : 'critical'} dot>
-                  {agent.status}
-                </Pill>
-                <span className="agent-seen">
-                  {agent.status === 'offline'
-                    ? `silent ${formatAge(agent.secondsSinceLastSeen)}`
-                    : `${formatAge(agent.secondsSinceLastSeen)} ago`}
-                </span>
+                {/* Only the exception is announced. A healthy agent shows its last-seen
+                    age and nothing else — "online" is what the absence of red means,
+                    and a green badge on every row buries the one that is red. */}
+                {agent.status === 'offline' ? (
+                  <Status tone="critical">offline</Status>
+                ) : (
+                  <span className="agent-seen">
+                    {formatAge(agent.secondsSinceLastSeen)} ago
+                  </span>
+                )}
+                {agent.status === 'offline' && (
+                  <span className="agent-seen">
+                    silent {formatAge(agent.secondsSinceLastSeen)}
+                  </span>
+                )}
               </span>
             </button>
           </li>

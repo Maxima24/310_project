@@ -520,7 +520,52 @@ button {
   height: 100%;
 }
 
-/* ---------------------------------------------------------------- pills */
+/* ---------------------------------------------------------------- status
+   Two weights, and the lighter one is the default.
+
+   `.status` — a dot plus neutral text. No fill, no border. This is what a healthy
+   agent, an ordinary event, and a routine state all get, so a row of them reads as
+   a calm list rather than a sticker album.
+
+   `.pill` — filled and outlined. Reserved for the rare thing that must be seen
+   from across a room. If everything is a pill, nothing is. */
+
+.status {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: var(--text-xs);
+  font-weight: 550;
+  color: var(--text-2);
+  white-space: nowrap;
+  text-transform: capitalize;
+}
+
+.status-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--idle);
+  flex: none;
+}
+
+/* Only exceptions tint the dot; the label stays neutral so the eye is drawn to the
+   one thing that changed, not to a wall of coloured words. */
+.status-critical .status-dot {
+  background: var(--critical);
+}
+.status-warn .status-dot {
+  background: var(--warn);
+}
+.status-ok .status-dot {
+  background: var(--ok);
+}
+
+/* The exception: a critical state colours its text too. */
+.status-critical {
+  color: var(--critical);
+}
+
 .pill {
   display: inline-flex;
   align-items: center;
@@ -564,9 +609,9 @@ button {
   border-color: var(--info-line);
 }
 .pill-idle {
-  color: var(--idle);
-  background: var(--idle-soft);
-  border-color: var(--idle-line);
+  color: var(--text-2);
+  background: var(--surface-2);
+  border-color: var(--line);
 }
 .pill-brand {
   color: var(--brand);
@@ -632,14 +677,19 @@ button {
   box-shadow: var(--edge);
 }
 
+/* The edge reads as a PROTECTION SCALE, not three unrelated states: full, partial,
+   none. An earlier version painted `away` red, which said "alarm" about the one mode
+   where the building is actually safest. Green appears here because confirming a good
+   state is the entire point of an arm indicator — the exception the colour rule
+   carves out. */
 .command-away {
-  border-left-color: var(--critical);
+  border-left-color: var(--ok);
 }
 .command-home {
   border-left-color: var(--warn);
 }
 .command-disarmed {
-  border-left-color: var(--idle);
+  border-left-color: var(--line-strong);
 }
 
 .command-state {
@@ -871,9 +921,11 @@ button {
   background: var(--brand-soft);
 }
 
+/* An offline agent gets ONE cue — a red left edge. Not a tinted card as well as a
+   red border as well as a red badge; three signals for one fact is what made the
+   list feel loud. */
 .agent-offline {
-  border-color: var(--critical-line);
-  background: var(--critical-soft);
+  border-left: 2px solid var(--critical);
 }
 
 .agent-icon {
@@ -978,6 +1030,30 @@ button {
   font-family: var(--font-mono);
   color: var(--text-3);
   font-variant-numeric: tabular-nums;
+}
+
+/* The event log is monochrome by design — see EventStream.tsx. Notable types are
+   marked with weight and a small leading tick, not with colour, so the panel can be
+   skimmed for activity without shimmering. */
+.event-type {
+  color: var(--text-2);
+  font-size: var(--text-xs);
+}
+
+.event-notable {
+  color: var(--text);
+  font-weight: 550;
+}
+
+.event-notable::before {
+  content: '';
+  display: inline-block;
+  width: 3px;
+  height: 3px;
+  border-radius: 50%;
+  background: var(--text-3);
+  vertical-align: middle;
+  margin-right: 6px;
 }
 
 .event-agent {

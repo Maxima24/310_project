@@ -1,6 +1,6 @@
 import type { AlertView } from '@cpe310/contracts';
 
-import { Button, Card, CountBadge, Empty, Pill, type Tone } from './ui';
+import { Button, Card, CountBadge, Empty, Status } from './ui';
 import { ApiError } from '../lib/api';
 import { canAcknowledgeAlert, usePermissions } from '../lib/permissions';
 import { useAcknowledge, useAgents } from '../lib/queries';
@@ -12,10 +12,11 @@ const FILTERS: Array<{ value: AlertFilter; label: string }> = [
   { value: 'all', label: 'All' },
 ];
 
-const SEVERITY_TONE: Record<string, Tone> = {
+/** `info` maps to neutral: an informational alert is not an exception. */
+const SEVERITY_TONE: Record<string, 'idle' | 'warn' | 'critical'> = {
   critical: 'critical',
   warning: 'warn',
-  info: 'info',
+  info: 'idle',
 };
 
 export function AlertList({
@@ -83,7 +84,12 @@ export function AlertList({
               >
                 <div className="alert-main">
                   <div className="alert-top">
-                    <Pill tone={SEVERITY_TONE[alert.severity] ?? 'idle'}>{alert.severity}</Pill>
+                    {/* The left stripe already carries severity as colour. Repeating it
+                        as a filled badge on every row was the same fact told twice, so
+                        this is the quiet form — only `critical` tints its text. */}
+                    <Status tone={SEVERITY_TONE[alert.severity] ?? 'idle'}>
+                      {alert.severity}
+                    </Status>
                     <span className="alert-type">{alert.type}</span>
                     <time className="alert-time" dateTime={alert.createdAt}>
                       {new Date(alert.createdAt).toLocaleTimeString([], {

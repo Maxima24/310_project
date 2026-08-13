@@ -46,8 +46,27 @@
   --brand-line: rgba(47, 128, 247, 0.42);
 
   /* ---------------------------------------------------------------- status
-     Semantic and deliberately separate from the brand. A console earns trust by
-     using colour to mean exactly one thing, so these never decorate. */
+
+     THE COLOUR RULE, and the most important line in this file:
+
+       Colour marks EXCEPTIONS. Nominal state is neutral.
+
+     An earlier version of this dashboard put a coloured pill on every agent row,
+     every alert, every event, and every stat. When everything is coloured nothing
+     is, and the one row that actually needed attention had to compete with forty
+     that did not. So:
+
+       red    — something is wrong RIGHT NOW
+       amber  — degraded, or needs a human eventually
+       blue   — interactive; never a state
+       grey   — everything else, including every healthy thing
+
+     Green is deliberately almost unused. "Online" and "all clear" do not need to
+     be announced — the ABSENCE of red already says it. Green is kept only for the
+     rare case where confirming a good state is the entire point.
+
+     Semantic hues are separate from the brand, so a colour on this screen always
+     means exactly one thing. */
   --critical: #ff5c5c;
   --critical-soft: rgba(255, 92, 92, 0.13);
   --critical-line: rgba(255, 92, 92, 0.4);

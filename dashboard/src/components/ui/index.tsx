@@ -70,8 +70,12 @@ export function Stat({
   icon?: IconName;
   value: ReactNode;
   unit?: string;
-  /** The change, not just the level — a number without movement hides the story. */
+  /** Context for the number — what changed, or what it is made of. */
   delta?: string;
+  /**
+   * Defaults to neutral, and should usually stay that way. A tint here means "this
+   * needs attention"; colouring every card's delta made none of them mean anything.
+   */
   deltaTone?: Tone;
   /** Proportional segments, drawn as a thin bar under the value. */
   bar?: Array<{ value: number; tone: Tone }>;
@@ -110,6 +114,35 @@ export function Stat({
 
 /* -------------------------------------------------------------------- pill */
 
+/**
+ * The DEFAULT way to show state: a dot and neutral text.
+ *
+ * Nominal states stay grey. Only an exception tints the dot, and only a critical one
+ * tints the label as well — so a list of healthy rows reads as calm, and the single
+ * row that needs attention is the only coloured thing on screen.
+ */
+export function Status({
+  tone = 'idle',
+  children,
+}: {
+  tone?: 'idle' | 'ok' | 'warn' | 'critical';
+  children: ReactNode;
+}) {
+  return (
+    <span className={`status status-${tone}`}>
+      <span className="status-dot" />
+      {children}
+    </span>
+  );
+}
+
+/**
+ * The heavier treatment: filled and outlined.
+ *
+ * Reserved for the few things that must carry across a room — an active critical
+ * alert, the zone a restricted credential is pinned to. Reach for `Status` first; if
+ * everything is a pill, nothing is.
+ */
 export function Pill({
   tone = 'idle',
   dot,
