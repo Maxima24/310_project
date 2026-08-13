@@ -1,4 +1,4 @@
-import { AgentStatus, type AgentType } from '@cpe310/contracts';
+import { AgentStatus, AlertType, type AgentType } from '@cpe310/contracts';
 import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { SchedulerRegistry } from '@nestjs/schedule';
@@ -50,6 +50,9 @@ export class AgentLivenessService implements OnModuleInit {
   /** Guards against a slow sweep overlapping the next scheduled tick. */
   private sweeping = false;
 
+  /** Whether the one-shot post-boot reconciliation has run. */
+  private reconciled = false;
+
   /**
    * Registered imperatively rather than with @Cron because the schedule is
    * configurable — a decorator argument cannot read ConfigService.
@@ -93,6 +96,52 @@ export class AgentLivenessService implements OnModuleInit {
   }
 
   /**
+   * Raises the missing alert for any agent already marked offline that has no open
+   * `agent_offline` alert. Runs once, on the first sweep after the grace period.
+   *
+   * Closes a real gap. The sweep flips a whole batch to offline in one transaction
+   * and then raises alerts one agent at a time, so a hub that dies mid-loop leaves
+   * later agents marked offline with no alert ever raised. The routine sweep cannot
+   * repair that, because it only ever looks at agents whose status is still `online`
+   * — those agents would stay silently offline forever, which is precisely the
+   * failure this system exists to prevent.
+   *
+   * Agents that have since come back are unaffected: they were flipped to `online`
+   * by their own heartbeat during the grace period, so they no longer match.
+   */
+  private async reconcileOfflineAgents(): Promise<void> {
+    try {
+      const offline = await this.prisma.agent.findMany({
+        where: {
+          status: AgentStatus.Offline,
+          // No unacknowledged offline alert on record for this agent.
+          alerts: {
+            none: { type: AlertType.AgentOffline, acknowledged: false },
+          },
+        },
+        select: { id: true, type: true, location: true, lastSeenAt: true },
+      });
+
+      if (offline.length === 0) return;
+
+      this.logger.warn(
+        `Reconciling ${offline.length} agent(s) left offline without an alert ` +
+          '(previous hub instance likely stopped mid-sweep)',
+      );
+
+      for (const agent of offline) {
+        await this.alerts.raiseAgentOffline(
+          { id: agent.id, type: agent.type, location: agent.location },
+          Date.now() - agent.lastSeenAt.getTime(),
+        );
+      }
+    } catch (error) {
+      // Reconciliation is best-effort; the routine sweep must still run.
+      this.logger.error(`Offline reconciliation failed: ${(error as Error).message}`);
+    }
+  }
+
+  /**
    * Finds agents that have gone quiet, flips them to offline, and raises one
    * alert each.
    *
@@ -110,7 +159,8 @@ export class AgentLivenessService implements OnModuleInit {
     }
 
     // A sweep slowed by a busy database must not overlap the next tick and alert
-    // twice on the same agent.
+    // twice on the same agent. Claimed before any awaiting work below — including
+    // reconciliation — or a sweep would yield before holding the lock.
     if (this.sweeping) {
       this.logger.warn('Previous liveness sweep still running — skipping this tick');
       return;
@@ -121,6 +171,13 @@ export class AgentLivenessService implements OnModuleInit {
     const cutoff = new Date(now - timeoutMs);
 
     try {
+      // Repairs state left inconsistent by a hub that died mid-sweep. Runs before
+      // the normal pass so a genuinely dead agent is never left silently offline.
+      if (!this.reconciled) {
+        this.reconciled = true;
+        await this.reconcileOfflineAgents();
+      }
+
       let stale: StaleAgent[];
 
       try {

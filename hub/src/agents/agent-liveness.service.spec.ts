@@ -22,9 +22,13 @@ interface AgentRow {
  * which is enough to assert the sweep's read-then-update sequence and the exact
  * predicate it uses.
  */
-async function buildService(staleRows: AgentRow[]) {
+async function buildService(staleRows: AgentRow[], orphanedOffline: AgentRow[] = []) {
   const agentDelegate = {
-    findMany: jest.fn().mockResolvedValue(staleRows),
+    // The sweep and the one-shot reconciliation both call findMany; distinguish them
+    // by whether the query is looking for offline agents.
+    findMany: jest.fn().mockImplementation(({ where }: { where: { status: string } }) =>
+      Promise.resolve(where.status === AgentStatus.Offline ? orphanedOffline : staleRows),
+    ),
     updateMany: jest.fn().mockResolvedValue({ count: staleRows.length }),
     findUnique: jest.fn().mockImplementation(({ where }: { where: { id: string } }) => {
       const row = staleRows.find((r) => r.id === where.id);
@@ -113,8 +117,12 @@ describe('AgentLivenessService.sweep', () => {
 
     await service.sweep();
 
-    const where = agentDelegate.findMany.mock.calls[0][0].where;
-    expect(where.status).toBe(AgentStatus.Online);
+    // Pick the sweep's own query; the one-shot reconciliation also calls findMany.
+    const sweepCall = agentDelegate.findMany.mock.calls.find(
+      (c) => c[0].where.status === AgentStatus.Online,
+    );
+    expect(sweepCall).toBeDefined();
+    const where = sweepCall![0].where;
     // A fresh agent is excluded by the cutoff, and an already-offline agent by the
     // status filter — that filter is what stops the sweep re-alerting every 5s.
     const cutoff = where.lastSeenAt.lt as Date;
@@ -189,6 +197,86 @@ describe('AgentLivenessService startup grace period', () => {
     await service.sweep();
 
     expect(alerts.raiseAgentOffline).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('AgentLivenessService post-boot reconciliation', () => {
+  const orphan: AgentRow = {
+    id: 'motion-hallway',
+    type: 'motion',
+    location: 'Hallway',
+    lastSeenAt: new Date(Date.now() - 300_000),
+  };
+
+  it('raises the missing alert for an agent left offline with no open alert', async () => {
+    // The gap this closes: the sweep flips a batch offline in one transaction then
+    // alerts one at a time, so a hub killed mid-loop leaves later agents marked
+    // offline with no alert. The routine sweep only looks at `online` agents, so
+    // those would stay silently offline forever — the exact failure this system
+    // exists to prevent. Observed for real when the Docker VM reset mid-sweep.
+    const { service, alerts } = await buildService([], [orphan]);
+
+    await service.sweep();
+
+    expect(alerts.raiseAgentOffline).toHaveBeenCalledTimes(1);
+    expect(alerts.raiseAgentOffline.mock.calls[0][0]).toEqual({
+      id: 'motion-hallway',
+      type: 'motion',
+      location: 'Hallway',
+    });
+  });
+
+  it('only reconciles once, not on every tick', async () => {
+    const { service, alerts } = await buildService([], [orphan]);
+
+    await service.sweep();
+    await service.sweep();
+    await service.sweep();
+
+    expect(alerts.raiseAgentOffline).toHaveBeenCalledTimes(1);
+  });
+
+  it('queries only offline agents that have no unacknowledged offline alert', async () => {
+    const { service, agentDelegate } = await buildService([], [orphan]);
+
+    await service.sweep();
+
+    const reconcileCall = agentDelegate.findMany.mock.calls.find(
+      (c) => c[0].where.status === AgentStatus.Offline,
+    );
+    expect(reconcileCall![0].where.alerts).toEqual({
+      none: { type: 'agent_offline', acknowledged: false },
+    });
+  });
+
+  it('does nothing when no agent was left in a half-swept state', async () => {
+    const { service, alerts } = await buildService([], []);
+
+    await service.sweep();
+
+    expect(alerts.raiseAgentOffline).not.toHaveBeenCalled();
+  });
+
+  it('still runs the routine sweep when reconciliation fails', async () => {
+    const { service, agentDelegate, alerts } = await buildService(
+      [{ id: 'door-front', type: 'door', location: 'Front door', lastSeenAt: new Date(Date.now() - 40_000) }],
+      [orphan],
+    );
+    agentDelegate.findMany.mockRejectedValueOnce(new Error('reconcile query failed'));
+
+    await service.sweep();
+
+    // The stale door agent must still be detected.
+    expect(alerts.raiseAgentOffline).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not reconcile during the startup grace period', async () => {
+    const { service, alerts } = await buildService([], [orphan]);
+    warmUp(service, 0);
+
+    await service.sweep();
+
+    expect(alerts.raiseAgentOffline).not.toHaveBeenCalled();
   });
 });
 
