@@ -210,20 +210,23 @@ def test_parser_rejects_a_zero_interval_end_to_end() -> None:
         )
 
 
-def test_missing_api_key_exits_with_guidance(monkeypatch, capsys) -> None:
-    monkeypatch.delenv("AGENT_API_KEY", raising=False)
+def test_missing_bootstrap_key_exits_with_guidance(monkeypatch, capsys) -> None:
+    monkeypatch.delenv("AGENT_BOOTSTRAP_KEY", raising=False)
 
     code = run_agent.main(["--type", "motion", "--id", "m"])
 
     assert code == run_agent.EXIT_MISSING_KEY
+    err = capsys.readouterr().err
     # Must name the variable and show both shells — a bare 401 loop is unhelpful.
-    assert "AGENT_API_KEY" in capsys.readouterr().err
+    assert "AGENT_BOOTSTRAP_KEY" in err
+    # And make clear this is only the enrollment secret, not a general-purpose key.
+    assert "enrollment secret" in err
 
 
 def test_gpio_stub_exits_cleanly_instead_of_tracebacking(monkeypatch, capsys) -> None:
-    monkeypatch.setenv("AGENT_API_KEY", "k")
+    monkeypatch.setenv("AGENT_BOOTSTRAP_KEY", "bootstrap-key")
 
-    code = run_agent.main(["--type", "motion", "--id", "m", "--real"])
+    code = run_agent.main(["--type", "motion", "--id", "m", "--real", "--no-token-cache"])
 
     assert code == run_agent.EXIT_BAD_HARDWARE
     assert "gpiozero" in capsys.readouterr().err

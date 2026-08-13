@@ -1,4 +1,5 @@
 import {
+  AuthRole,
   WS_AGENT,
   WS_ALERT,
   WS_EVENT,
@@ -9,7 +10,6 @@ import {
   type SystemModeResponse,
 } from '@cpe310/contracts';
 import { Logger } from '@nestjs/common';
-import { ConfigService } from '@nestjs/config';
 import {
   OnGatewayConnection,
   OnGatewayDisconnect,
@@ -18,7 +18,8 @@ import {
 } from '@nestjs/websockets';
 import type { Server, Socket } from 'socket.io';
 
-import { keyMatches } from '../common/security/compare-key';
+import { CredentialService } from '../common/security/credential.service';
+import { extractBearer, redact } from '../common/security/tokens';
 
 /**
  * The @WebSocketGateway decorator is evaluated at class-definition time, long
@@ -48,28 +49,51 @@ export class RealtimeGateway implements OnGatewayConnection, OnGatewayDisconnect
   @WebSocketServer()
   private server: Server;
 
-  constructor(private readonly config: ConfigService) {}
+  constructor(private readonly credentials: CredentialService) {}
 
   /**
-   * Nest guards do not run on socket.io handshakes, so auth happens here using
-   * the same constant-time comparison the HTTP guard uses.
+   * Nest guards do not run on socket.io handshakes, so the gateway authenticates
+   * itself — through the same CredentialService the HTTP guard uses, so there is one
+   * implementation of "who is this?".
+   *
+   * The live feed carries every event and alert in the building, so it requires the
+   * **operator** credential. An agent token is explicitly not enough: a compromised
+   * sensor should not be able to watch the whole system to time an intrusion.
    */
-  handleConnection(client: Socket): void {
-    const provided = client.handshake.auth?.key ?? client.handshake.headers['x-agent-key'];
-    const expected = this.config.get<string>('agentApiKey');
+  async handleConnection(client: Socket): Promise<void> {
+    const provided =
+      (client.handshake.auth?.key as string | undefined) ??
+      extractBearer(client.handshake.headers.authorization) ??
+      undefined;
 
-    if (!expected || !keyMatches(provided, expected)) {
-      this.logger.warn(
-        `Rejected WebSocket ${client.id} from ${client.handshake.address}: ` +
-          (provided ? 'bad key' : 'no auth.key in handshake'),
-      );
-      // `true` closes the underlying connection rather than just the namespace,
-      // so a client with a bad key cannot sit there retrying on the same socket.
-      client.disconnect(true);
+    if (!provided) {
+      this.reject(client, 'no auth.key in handshake');
       return;
     }
 
-    this.logger.log(`WebSocket client connected: ${client.id}`);
+    const identity = await this.credentials.resolve(provided);
+
+    if (!identity) {
+      this.reject(client, `unknown credential ${redact(provided)}`);
+      return;
+    }
+
+    if (identity.role !== AuthRole.Operator) {
+      this.reject(
+        client,
+        `role "${identity.role}" cannot subscribe to the live feed (operator required)`,
+      );
+      return;
+    }
+
+    this.logger.log(`WebSocket operator connected: ${client.id}`);
+  }
+
+  private reject(client: Socket, reason: string): void {
+    this.logger.warn(`Rejected WebSocket ${client.id} from ${client.handshake.address}: ${reason}`);
+    // `true` closes the underlying connection rather than just the namespace, so a
+    // client with a bad credential cannot sit there retrying on the same socket.
+    client.disconnect(true);
   }
 
   handleDisconnect(client: Socket): void {

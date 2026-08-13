@@ -63,6 +63,15 @@ model Agent {
   version      String?
   capabilities String[]    @default([])
   registeredAt DateTime    @default(now())
+  /// SHA-256 of the agent's bearer token. Only the hash is stored, so a database
+  /// dump does not hand over working credentials and a lost token can only be
+  /// rotated, never recovered. Unique because it is the lookup key on every request.
+  tokenHash      String?   @unique
+  tokenIssuedAt  DateTime?
+  /// Count of re-enrollments. Legitimate when an agent loses its token file, but
+  /// also exactly what someone holding the bootstrap key would cause, so it is
+  /// recorded rather than silently overwritten.
+  tokenRotations Int       @default(0)
   /// Written on every heartbeat AND every event — an event is proof of life too.
   /// This is the liveness source of truth; Redis is roadmap, not needed at this scale.
   lastSeenAt   DateTime    @default(now())
@@ -72,6 +81,44 @@ model Agent {
 
   /// Exactly matches the liveness sweep predicate: status = 'online' AND lastSeenAt < cutoff.
   @@index([status, lastSeenAt])
+}
+
+enum NotificationChannel {
+  email
+  webhook
+  log
+}
+
+enum NotificationStatus {
+  sent
+  failed
+  pending
+  skipped
+}
+
+/// One delivery attempt of one alert to one channel.
+///
+/// Persisted rather than fire-and-forget so a failed send is retryable and an
+/// operator can answer "was anyone actually told?" — an alarm that silently failed
+/// to notify is indistinguishable from one that never fired.
+model Notification {
+  id        String              @id @default(uuid())
+  alertId   String
+  alert     Alert               @relation(fields: [alertId], references: [id], onDelete: Cascade)
+  channel   NotificationChannel
+  status    NotificationStatus  @default(pending)
+  attempts  Int                 @default(0)
+  error     String?
+  createdAt DateTime            @default(now())
+  deliveredAt DateTime?
+  /// When the retry worker should next try. Null once terminal.
+  nextAttemptAt DateTime?
+
+  /// One row per (alert, channel): the unique constraint is what makes delivery
+  /// idempotent if a retry and a fresh dispatch race.
+  @@unique([alertId, channel])
+  /// Drives the retry sweep.
+  @@index([status, nextAttemptAt])
 }
 
 /// A raw sensor observation. Facts only — no policy judgement.
@@ -111,6 +158,8 @@ model Alert {
   acknowledged   Boolean   @default(false)
   acknowledgedAt DateTime?
   createdAt      DateTime  @default(now())
+
+  notifications Notification[]
 
   @@index([createdAt(sort: Desc)])
   @@index([acknowledged, createdAt(sort: Desc)])

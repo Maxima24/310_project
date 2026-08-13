@@ -17,8 +17,17 @@ export enum NodeEnv {
   Test = 'test',
 }
 
-/** The sample key shipped in `.env.example`. Refused in production. */
-export const SAMPLE_API_KEY = 'dev-key-change-me';
+/** Sample secrets shipped in `.env.example`. Refused in production. */
+export const SAMPLE_BOOTSTRAP_KEY = 'dev-bootstrap-key-change-me';
+export const SAMPLE_OPERATOR_KEY = 'dev-operator-key-change-me';
+
+export const SAMPLE_KEYS = new Set<string>([
+  SAMPLE_BOOTSTRAP_KEY,
+  SAMPLE_OPERATOR_KEY,
+  // The pre-roadmap-2 shared key, refused outright so an old .env cannot be carried
+  // forward into production.
+  'dev-key-change-me',
+]);
 
 /**
  * Boot-time env contract. A missing or nonsensical value must kill the process
@@ -35,13 +44,27 @@ export class EnvVars {
   @Max(65535)
   PORT: number = 3000;
 
+  /**
+   * Provisioning secret. Authorises `POST /agents/register` and nothing else.
+   * Every agent host needs it; compromise allows enrolling or re-enrolling agents,
+   * which is why re-enrollments are counted and logged. mTLS or short-lived
+   * enrollment tokens are the next step up (see README).
+   */
   @IsString()
-  @IsNotEmpty({ message: 'AGENT_API_KEY is required — copy .env.example to .env and set one.' })
-  // A one-character key is guessable in a single request. This is the only thing
-  // standing between the network and the alert system, so refuse the obviously
-  // broken case at boot rather than appearing to work.
-  @MinLength(8, { message: 'AGENT_API_KEY must be at least 8 characters.' })
-  AGENT_API_KEY: string;
+  @IsNotEmpty({
+    message: 'AGENT_BOOTSTRAP_KEY is required — copy .env.example to .env and set one.',
+  })
+  @MinLength(8, { message: 'AGENT_BOOTSTRAP_KEY must be at least 8 characters.' })
+  AGENT_BOOTSTRAP_KEY: string;
+
+  /**
+   * Operator credential: arm/disarm, acknowledge alerts, read history, WebSocket.
+   * Must never be handed to a sensor — that would undo the separation entirely.
+   */
+  @IsString()
+  @IsNotEmpty({ message: 'OPERATOR_KEY is required — copy .env.example to .env and set one.' })
+  @MinLength(8, { message: 'OPERATOR_KEY must be at least 8 characters.' })
+  OPERATOR_KEY: string;
 
   @IsString()
   @IsNotEmpty({ message: 'DATABASE_URL is required (postgresql://user:pass@host:5432/db).' })
@@ -118,9 +141,22 @@ export function validateEnv(raw: Record<string, unknown>): EnvVars {
     throw new Error(`Invalid environment configuration:\n${details}`);
   }
 
-  if (config.NODE_ENV === NodeEnv.Production && config.AGENT_API_KEY === SAMPLE_API_KEY) {
+  if (config.NODE_ENV === NodeEnv.Production) {
+    for (const key of ['AGENT_BOOTSTRAP_KEY', 'OPERATOR_KEY'] as const) {
+      if (SAMPLE_KEYS.has(config[key])) {
+        throw new Error(
+          `${key} is still a sample value ("${config[key]}"). Set a real secret before running in production.`,
+        );
+      }
+    }
+  }
+
+  if (config.AGENT_BOOTSTRAP_KEY === config.OPERATOR_KEY) {
+    // Identical secrets collapse the two roles back into one shared key and undo
+    // the entire point of separating them: any agent host could then arm/disarm.
     throw new Error(
-      `AGENT_API_KEY is still the sample value "${SAMPLE_API_KEY}". Set a real key before running in production.`,
+      'AGENT_BOOTSTRAP_KEY and OPERATOR_KEY must differ — reusing one secret for both ' +
+        'gives every agent host operator privileges.',
     );
   }
 

@@ -54,4 +54,13 @@ export interface AgentAckResponse {
    * expectation instead of hardcoding 10s.
    */
   heartbeatIntervalMs: number;
+  /**
+   * Present only on `POST /agents/register`: the agent's own token, shown once.
+   * Absent on heartbeats — see EnrollmentResponse in ./auth.
+   */
+  enrollment?: {
+    token: string;
+    issuedAt: string;
+    rotated: boolean;
+  };
 }

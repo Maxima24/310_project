@@ -1,7 +1,13 @@
-import { NodeEnv, SAMPLE_API_KEY, validateEnv } from './env.validation';
+import {
+  NodeEnv,
+  SAMPLE_BOOTSTRAP_KEY,
+  SAMPLE_OPERATOR_KEY,
+  validateEnv,
+} from './env.validation';
 
 const VALID = {
-  AGENT_API_KEY: 'a-real-secret-key',
+  AGENT_BOOTSTRAP_KEY: 'a-real-bootstrap-secret',
+  OPERATOR_KEY: 'a-real-operator-secret',
   DATABASE_URL: 'postgresql://user:pass@localhost:5432/security',
 };
 
@@ -29,26 +35,53 @@ describe('validateEnv', () => {
 
   // The whole point of validating at boot: a hub that starts without these is a hub
   // that 401s or 500s mysteriously later.
-  it.each(['AGENT_API_KEY', 'DATABASE_URL'])('refuses to start without %s', (key) => {
-    const env: Record<string, unknown> = { ...VALID };
-    delete env[key];
+  it.each(['AGENT_BOOTSTRAP_KEY', 'OPERATOR_KEY', 'DATABASE_URL'])(
+    'refuses to start without %s',
+    (key) => {
+      const env: Record<string, unknown> = { ...VALID };
+      delete env[key];
 
-    expect(() => validateEnv(env)).toThrow(new RegExp(key));
+      expect(() => validateEnv(env)).toThrow(new RegExp(key));
+    },
+  );
+
+  it.each(['AGENT_BOOTSTRAP_KEY', 'OPERATOR_KEY'])('rejects a short %s', (key) => {
+    expect(() => validateEnv({ ...VALID, [key]: 'x' })).toThrow(/at least 8/i);
   });
 
-  it('rejects an API key short enough to guess', () => {
-    expect(() => validateEnv({ ...VALID, AGENT_API_KEY: 'x' })).toThrow(/at least 8/i);
+  it('allows the sample keys outside production', () => {
+    expect(() =>
+      validateEnv({
+        ...VALID,
+        AGENT_BOOTSTRAP_KEY: SAMPLE_BOOTSTRAP_KEY,
+        OPERATOR_KEY: SAMPLE_OPERATOR_KEY,
+      }),
+    ).not.toThrow();
   });
 
-  it('allows the sample key outside production', () => {
-    expect(() => validateEnv({ ...VALID, AGENT_API_KEY: SAMPLE_API_KEY })).not.toThrow();
-  });
-
-  it('refuses the sample key in production', () => {
+  it.each([
+    ['AGENT_BOOTSTRAP_KEY', SAMPLE_BOOTSTRAP_KEY],
+    ['OPERATOR_KEY', SAMPLE_OPERATOR_KEY],
+  ])('refuses the sample %s in production', (key, sample) => {
     // Guards the one mistake that would ship an open alert system.
     expect(() =>
-      validateEnv({ ...VALID, AGENT_API_KEY: SAMPLE_API_KEY, NODE_ENV: NodeEnv.Production }),
+      validateEnv({ ...VALID, [key]: sample, NODE_ENV: NodeEnv.Production }),
     ).toThrow(/sample value/i);
+  });
+
+  it('refuses the pre-roadmap-2 shared key in production', () => {
+    // An old .env carried forward must not silently work.
+    expect(() =>
+      validateEnv({ ...VALID, OPERATOR_KEY: 'dev-key-change-me', NODE_ENV: NodeEnv.Production }),
+    ).toThrow(/sample value/i);
+  });
+
+  it('refuses identical bootstrap and operator secrets', () => {
+    // Reusing one secret collapses the roles back into a shared key and hands every
+    // agent host operator privileges — the exact thing roadmap 2 removes.
+    expect(() =>
+      validateEnv({ ...VALID, AGENT_BOOTSTRAP_KEY: 'same-secret-value', OPERATOR_KEY: 'same-secret-value' }),
+    ).toThrow(/must differ/i);
   });
 
   it('refuses a heartbeat timeout that is not longer than the interval', () => {

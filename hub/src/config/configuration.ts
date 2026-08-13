@@ -8,7 +8,12 @@ import { validateEnv } from './env.validation';
 export interface AppConfig {
   nodeEnv: string;
   port: number;
-  agentApiKey: string;
+  auth: {
+    /** Enrollment only. */
+    bootstrapKey: string;
+    /** Dashboards and humans. */
+    operatorKey: string;
+  };
   corsOrigin: string | string[];
   liveness: {
     timeoutMs: number;
@@ -30,7 +35,10 @@ export function loadConfiguration(): AppConfig {
   return {
     nodeEnv: env.NODE_ENV,
     port: env.PORT,
-    agentApiKey: env.AGENT_API_KEY,
+    auth: {
+      bootstrapKey: env.AGENT_BOOTSTRAP_KEY,
+      operatorKey: env.OPERATOR_KEY,
+    },
     corsOrigin:
       env.CORS_ORIGIN === '*'
         ? '*'

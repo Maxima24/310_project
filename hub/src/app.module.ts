@@ -5,8 +5,9 @@ import { ScheduleModule } from '@nestjs/schedule';
 
 import { AgentsModule } from './agents/agents.module';
 import { AlertsModule } from './alerts/alerts.module';
-import { ApiKeyGuard } from './common/guards/api-key.guard';
+import { AuthGuard } from './common/guards/auth.guard';
 import { PrismaModule } from './common/prisma/prisma.module';
+import { SecurityModule } from './common/security/security.module';
 import { loadConfiguration } from './config/configuration';
 import { EventsModule } from './events/events.module';
 import { HealthController } from './health.controller';
@@ -24,6 +25,7 @@ import { SystemModule } from './system/system.module';
     }),
     ScheduleModule.forRoot(),
     PrismaModule,
+    SecurityModule,
     RealtimeModule,
     SystemModule,
     AlertsModule,
@@ -32,9 +34,10 @@ import { SystemModule } from './system/system.module';
   ],
   controllers: [HealthController],
   providers: [
-    // Global so every new controller is authenticated by default; opting out
-    // requires an explicit @Public().
-    { provide: APP_GUARD, useClass: ApiKeyGuard },
+    // Global so every new controller is authenticated by default. With no @Roles
+    // decorator the guard demands the operator credential, so a route added later
+    // is locked down rather than accidentally reachable by a sensor token.
+    { provide: APP_GUARD, useClass: AuthGuard },
   ],
 })
 export class AppModule {}

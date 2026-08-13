@@ -11,7 +11,12 @@
     "types": ["node", "jest"],
     // Nest's DI reads constructor param types via emitDecoratorMetadata, which
     // needs the property-initialisation check relaxed for injected `!`-less fields.
-    "strictPropertyInitialization": false
+    "strictPropertyInitialization": false,
+    // Keep the incremental cache INSIDE dist. nest-cli's `deleteOutDir` wipes dist
+    // on every build; a .tsbuildinfo outside it would survive and convince
+    // TypeScript that untouched files were still emitted, silently producing a
+    // partial dist that fails at runtime with MODULE_NOT_FOUND.
+    "tsBuildInfoFile": "dist/.tsbuildinfo"
   },
   "include": ["src/**/*.ts"],
   "exclude": ["node_modules", "dist", "prisma"]

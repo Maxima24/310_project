@@ -5,10 +5,15 @@
     python run_agent.py --type door   --id door-front     --location "Front door"
     python run_agent.py --type camera --id camera-lobby   --location "Lobby" --real --source 0
 
-The API key comes from AGENT_API_KEY and must match the hub's:
+Credentials (roadmap item 2): an agent enrolls once with the hub's bootstrap key and
+is issued its own token, which it then uses for everything else. The token is cached
+under ~/.cpe310 so a restart does not rotate it.
 
-    PowerShell:  $env:AGENT_API_KEY = "dev-key-change-me"
-    bash/zsh:    export AGENT_API_KEY=dev-key-change-me
+    PowerShell:  $env:AGENT_BOOTSTRAP_KEY = "dev-bootstrap-key-change-me"
+    bash/zsh:    export AGENT_BOOTSTRAP_KEY=dev-bootstrap-key-change-me
+
+The bootstrap key cannot arm/disarm, acknowledge alerts, or read history — that
+needs the operator credential, which agents never see.
 """
 
 from __future__ import annotations
@@ -17,10 +22,12 @@ import argparse
 import logging
 import os
 import sys
+from pathlib import Path
 
 from security_agent.agents import CameraAgent, DoorAgent, MotionAgent
 from security_agent.base import AgentConfigurationError, BaseAgent
 from security_agent.contracts import AgentType
+from security_agent.credentials import TokenStore
 from security_agent.sensors import (
     GpioDoorSensor,
     GpioMotionSensor,
@@ -127,6 +134,20 @@ def build_parser() -> argparse.ArgumentParser:
         help="Seconds to wait before reporting the same kind of activity again "
         "(default: 5 for motion, 10 for camera). Distinct from the hub's alert dedup.",
     )
+    creds = parser.add_argument_group("credentials")
+    creds.add_argument(
+        "--token-dir",
+        default=os.environ.get("AGENT_TOKEN_DIR"),
+        help="Where to cache this agent's issued token (default ~/.cpe310). "
+        "Caching avoids a token rotation on every restart.",
+    )
+    creds.add_argument(
+        "--no-token-cache",
+        action="store_true",
+        help="Do not persist the token. The agent re-enrolls (and rotates) on every "
+        "start — useful for ephemeral containers, noisier in the hub's audit log.",
+    )
+
     parser.add_argument(
         "--log-level",
         default="INFO",
@@ -185,18 +206,27 @@ def main(argv: list[str] | None = None) -> int:
         format="%(asctime)s %(levelname)-7s %(name)-28s %(message)s",
     )
 
-    api_key = os.environ.get("AGENT_API_KEY", "").strip()
-    if not api_key:
+    bootstrap_key = os.environ.get("AGENT_BOOTSTRAP_KEY", "").strip()
+    if not bootstrap_key:
         # Fail loudly here rather than letting the agent spin on 401s forever.
         print(
-            "AGENT_API_KEY is not set — it must match the hub's key.\n"
-            '  PowerShell:  $env:AGENT_API_KEY = "dev-key-change-me"\n'
-            "  bash/zsh:    export AGENT_API_KEY=dev-key-change-me",
+            "AGENT_BOOTSTRAP_KEY is not set — it must match the hub's AGENT_BOOTSTRAP_KEY.\n"
+            '  PowerShell:  $env:AGENT_BOOTSTRAP_KEY = "dev-bootstrap-key-change-me"\n'
+            "  bash/zsh:    export AGENT_BOOTSTRAP_KEY=dev-bootstrap-key-change-me\n"
+            "\n"
+            "Note: this is the enrollment secret only. The agent exchanges it for its\n"
+            "own token on first run and caches that under ~/.cpe310.",
             file=sys.stderr,
         )
         return EXIT_MISSING_KEY
 
-    transport = HttpTransport(args.hub, api_key)
+    token_store = (
+        None
+        if args.no_token_cache
+        else TokenStore(args.id, Path(args.token_dir) if args.token_dir else None)
+    )
+
+    transport = HttpTransport(args.hub, bootstrap_key, token_store=token_store)
 
     if args.heartbeat_interval >= 30.0:
         # The hub's default HEARTBEAT_TIMEOUT_MS is 30s, so beating this slowly gets

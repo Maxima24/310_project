@@ -10,6 +10,7 @@ import type { Agent } from '@prisma/client';
 
 import { AlertsService } from '../alerts/alerts.service';
 import { PrismaService } from '../common/prisma/prisma.service';
+import { mintAgentToken } from '../common/security/tokens';
 import { RealtimeGateway } from '../realtime/realtime.gateway';
 
 @Injectable()
@@ -35,6 +36,14 @@ export class AgentsService {
   async register(dto: RegisterAgentRequest): Promise<AgentAckResponse> {
     const previous = await this.prisma.agent.findUnique({ where: { id: dto.id } });
 
+    // Every registration mints a fresh token. Rotation-on-enroll means a token
+    // captured earlier stops working the moment the agent re-enrolls, and it keeps
+    // the flow single-step: an agent never has to reason about whether its token is
+    // still valid, only whether it has one.
+    const { token, hash } = mintAgentToken();
+    const rotated = previous?.tokenHash != null;
+    const issuedAt = new Date();
+
     const agent = await this.prisma.agent.upsert({
       where: { id: dto.id },
       create: {
@@ -44,6 +53,8 @@ export class AgentsService {
         version: dto.version ?? null,
         capabilities: dto.capabilities ?? [],
         status: AgentStatus.Online,
+        tokenHash: hash,
+        tokenIssuedAt: issuedAt,
       },
       update: {
         // Type/location can legitimately change if a sensor is physically moved.
@@ -56,12 +67,24 @@ export class AgentsService {
         ...(dto.capabilities !== undefined ? { capabilities: dto.capabilities } : {}),
         status: AgentStatus.Online,
         lastSeenAt: new Date(),
+        tokenHash: hash,
+        tokenIssuedAt: issuedAt,
+        tokenRotations: { increment: 1 },
       },
     });
 
     this.logger.log(
       `${previous ? 'Re-registered' : 'Registered'} ${agent.type} agent ${agent.id} at ${agent.location}`,
     );
+
+    if (rotated) {
+      // Legitimate when an agent loses its token file, but it is also exactly what
+      // someone holding the bootstrap key would cause — so it is never silent.
+      this.logger.warn(
+        `Rotated token for ${agent.id} (rotation #${agent.tokenRotations}); ` +
+          'any previously issued token for this agent is now invalid',
+      );
+    }
 
     if (previous?.status === AgentStatus.Offline) {
       await this.handleRecovery(agent);
@@ -70,7 +93,13 @@ export class AgentsService {
     const view = toAgentView(agent);
     this.realtime.emitAgent(view);
 
-    return { agent: view, heartbeatIntervalMs: this.heartbeatIntervalMs };
+    return {
+      agent: view,
+      heartbeatIntervalMs: this.heartbeatIntervalMs,
+      // The only time the plaintext token exists outside the agent. The hub keeps
+      // only its hash, so this cannot be re-read later — only rotated.
+      enrollment: { token, issuedAt: issuedAt.toISOString(), rotated },
+    };
   }
 
   /**

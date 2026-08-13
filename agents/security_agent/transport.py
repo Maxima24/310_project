@@ -16,6 +16,7 @@ from collections import deque
 import requests
 
 from .contracts import AgentDescriptor, SensorEvent
+from .credentials import TokenStore
 
 log = logging.getLogger(__name__)
 
@@ -67,8 +68,9 @@ class HttpTransport(Transport):
     def __init__(
         self,
         hub_url: str,
-        api_key: str,
+        bootstrap_key: str,
         *,
+        token_store: TokenStore | None = None,
         timeout: float = 5.0,
         max_backoff: float = 30.0,
         queue_max: int = EVENT_QUEUE_MAX,
@@ -77,12 +79,15 @@ class HttpTransport(Transport):
         self._timeout = timeout
         self._max_backoff = max_backoff
         self._session = requests.Session()
-        self._session.headers.update(
-            {"x-agent-key": api_key, "Content-Type": "application/json"}
-        )
+        self._session.headers.update({"Content-Type": "application/json"})
+        self._bootstrap_key = bootstrap_key
+        self._token_store = token_store
+        #: The agent's own token, issued at enrollment. Loaded from disk if present so
+        #: a restart does not force a rotation.
+        self._token: str | None = token_store.load() if token_store else None
         self._pending: deque[SensorEvent] = deque(maxlen=queue_max)
         # register()/publish_event() run on the main thread while heartbeat() runs
-        # on its own; both can trigger a re-register.
+        # on its own; both can trigger a re-enrollment, and both touch _token.
         self._lock = threading.Lock()
         self._descriptor: AgentDescriptor | None = None
         self._queue_full_warned = False
@@ -90,20 +95,31 @@ class HttpTransport(Transport):
     # -- Transport ---------------------------------------------------------
 
     def register(self, descriptor: AgentDescriptor) -> None:
+        """Enrolls with the bootstrap key and stores the issued token.
+
+        Skipped entirely when a token is already on disk: re-enrolling would rotate
+        the token for no reason, and the hub logs every rotation as security-relevant.
+        A stale token is detected lazily instead — the first 401 triggers enrollment.
+        """
         with self._lock:
             self._descriptor = descriptor
-        self._post("/agents/register", descriptor.to_payload())
-        log.info("Registered with hub at %s as %s", self._base, descriptor.id)
+            have_token = self._token is not None
+
+        if have_token:
+            log.info("Reusing stored token for %s (no re-enrollment needed)", descriptor.id)
+            return
+
+        self._enroll(descriptor)
 
     def heartbeat(self, agent_id: str) -> None:
-        self._post(f"/agents/{agent_id}/heartbeat", None, allow_reregister=True)
+        self._post(f"/agents/{agent_id}/heartbeat", None, allow_recovery=True)
 
     def publish_event(self, event: SensorEvent) -> None:
         # Drain anything buffered from an earlier outage first so the hub receives
         # events in the order they happened.
         self._flush_pending()
         try:
-            self._post("/events", event.to_payload(), allow_reregister=True)
+            self._post("/events", event.to_payload(), allow_recovery=True)
         except TransportError:
             self._enqueue(event)
             raise
@@ -128,59 +144,131 @@ class HttpTransport(Transport):
         while self._pending:
             queued = self._pending[0]
             try:
-                self._post("/events", queued.to_payload(), allow_reregister=True)
+                self._post("/events", queued.to_payload(), allow_recovery=True)
             except TransportError:
                 return  # still unreachable; keep the backlog for the next attempt
             self._pending.popleft()
             self._queue_full_warned = False
             log.info("Flushed buffered event (%s remaining)", len(self._pending))
 
+    # -- enrollment --------------------------------------------------------
+
+    def _enroll(self, descriptor: AgentDescriptor) -> None:
+        """Exchanges the bootstrap key for this agent's own token."""
+        url = f"{self._base}/agents/register"
+        try:
+            response = self._session.post(
+                url,
+                json=descriptor.to_payload(),
+                headers={"Authorization": f"Bearer {self._bootstrap_key}"},
+                timeout=self._timeout,
+            )
+        except requests.RequestException as exc:
+            raise TransportError(f"{url} unreachable: {exc}") from exc
+
+        if response.status_code in (401, 403):
+            raise TransportError(
+                "hub rejected the bootstrap key (%s) - check AGENT_BOOTSTRAP_KEY matches "
+                "the hub's AGENT_BOOTSTRAP_KEY" % response.status_code
+            )
+        if not response.ok:
+            raise TransportError(f"{url} returned {response.status_code}: {response.text[:200]}")
+
+        try:
+            token = response.json()["enrollment"]["token"]
+        except (ValueError, KeyError, TypeError) as exc:
+            raise TransportError(
+                f"hub did not return an enrollment token: {response.text[:200]}"
+            ) from exc
+
+        with self._lock:
+            self._token = token
+        if self._token_store:
+            self._token_store.save(token)
+
+        log.info("Enrolled with hub at %s as %s", self._base, descriptor.id)
+
+    def _reenroll(self) -> bool:
+        """Re-runs enrollment after the hub rejected or did not recognise our token."""
+        with self._lock:
+            descriptor = self._descriptor
+            self._token = None
+        if self._token_store:
+            # Drop the stale file so a crash between here and a successful enrollment
+            # does not leave a token that will never work again.
+            self._token_store.clear()
+        if descriptor is None:
+            return False
+        try:
+            self._enroll(descriptor)
+            return True
+        except TransportError as exc:
+            log.warning("Re-enrollment failed: %s", exc)
+            return False
+
+    # -- requests ----------------------------------------------------------
+
     def _post(
         self,
         path: str,
         payload: dict | None,
         *,
-        allow_reregister: bool = False,
+        allow_recovery: bool = False,
     ) -> None:
-        """One attempt. Raises TransportError on any failure — retries live in the caller's loop."""
+        """One attempt using the agent's own token.
+
+        Retries live in the caller's loop; this raises TransportError on any failure.
+
+        Two responses trigger re-enrollment when ``allow_recovery`` is set:
+
+        * **401/403** — the token is stale. Happens when the hub rotated it, or when
+          the agent's stored token predates a database reset.
+        * **404** — the hub has no such agent, e.g. its database was wiped.
+
+        Either way the fix is the same, and doing it automatically is what makes the
+        fleet self-healing rather than needing a human to restart agents.
+        """
         url = f"{self._base}{path}"
-        try:
-            response = self._session.post(url, json=payload, timeout=self._timeout)
-        except requests.RequestException as exc:
-            raise TransportError(f"{url} unreachable: {exc}") from exc
 
-        if response.status_code == 404 and allow_reregister:
-            log.warning("Hub does not know this agent (404) — re-registering")
-            if self._re_register():
-                # Retry once now that the agent exists again.
-                try:
-                    response = self._session.post(url, json=payload, timeout=self._timeout)
-                except requests.RequestException as exc:
-                    raise TransportError(f"{url} unreachable after re-register: {exc}") from exc
-            else:
-                raise TransportError("re-registration failed")
+        with self._lock:
+            token = self._token
 
-        if response.status_code == 401:
-            # Never retried by the caller in a tight loop without backoff, but this
-            # is operator error (wrong AGENT_API_KEY) and worth saying plainly.
+        if token is None:
+            if not (allow_recovery and self._reenroll()):
+                raise TransportError("no agent token — enroll first")
+            with self._lock:
+                token = self._token
+
+        response = self._attempt(url, payload, token)
+
+        if response.status_code in (401, 403, 404) and allow_recovery:
+            log.warning(
+                "Hub rejected our credential (%s) — re-enrolling", response.status_code
+            )
+            if not self._reenroll():
+                raise TransportError("re-enrollment failed")
+            with self._lock:
+                token = self._token
+            response = self._attempt(url, payload, token)
+
+        if response.status_code in (401, 403):
             raise TransportError(
-                "hub rejected the API key (401) — check AGENT_API_KEY matches the hub's"
+                f"hub rejected the agent token ({response.status_code}) even after re-enrolling"
             )
 
         if not response.ok:
             raise TransportError(f"{url} returned {response.status_code}: {response.text[:200]}")
 
-    def _re_register(self) -> bool:
-        with self._lock:
-            descriptor = self._descriptor
-        if descriptor is None:
-            return False
+    def _attempt(self, url: str, payload: dict | None, token: str | None):
         try:
-            self._post("/agents/register", descriptor.to_payload())
-            return True
-        except TransportError as exc:
-            log.warning("Re-registration failed: %s", exc)
-            return False
+            return self._session.post(
+                url,
+                json=payload,
+                headers={"Authorization": f"Bearer {token}"},
+                timeout=self._timeout,
+            )
+        except requests.RequestException as exc:
+            raise TransportError(f"{url} unreachable: {exc}") from exc
 
     def backoff_delay(self, attempt: int) -> float:
         """Exponential backoff with full jitter, capped.

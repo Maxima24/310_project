@@ -2,7 +2,10 @@
   "extends": "@cpe310/tsconfig/base.json",
   "compilerOptions": {
     "rootDir": "src",
-    "outDir": "dist"
+    "outDir": "dist",
+    // Inside dist so the incremental cache is always discarded together with the
+    // output it describes — a stale cache next to a cleaned dist yields a partial build.
+    "tsBuildInfoFile": "dist/.tsbuildinfo"
   },
   "include": ["src/**/*.ts"]
 }

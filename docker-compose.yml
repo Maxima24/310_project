@@ -14,8 +14,11 @@ x-agent-common: &agent-common
   image: cpe310-agent:latest
   restart: unless-stopped
   environment:
-    AGENT_API_KEY: ${AGENT_API_KEY:-dev-key-change-me}
+    # Agents get the enrollment secret only. Each is issued its own token on first
+    # run and can then act solely as itself — it never sees OPERATOR_KEY.
+    AGENT_BOOTSTRAP_KEY: ${AGENT_BOOTSTRAP_KEY:-dev-bootstrap-key-change-me}
     HUB_URL: http://hub:3000
+    AGENT_TOKEN_DIR: /home/agent/.cpe310
   depends_on:
     hub:
       condition: service_healthy
@@ -63,7 +66,8 @@ services:
       #   NODE_ENV=production AGENT_API_KEY=<a real secret> docker compose up
       NODE_ENV: ${NODE_ENV:-development}
       PORT: 3000
-      AGENT_API_KEY: ${AGENT_API_KEY:-dev-key-change-me}
+      AGENT_BOOTSTRAP_KEY: ${AGENT_BOOTSTRAP_KEY:-dev-bootstrap-key-change-me}
+      OPERATOR_KEY: ${OPERATOR_KEY:-dev-operator-key-change-me}
       DATABASE_URL: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${POSTGRES_DB:-security}?schema=public
       HEARTBEAT_INTERVAL_MS: ${HEARTBEAT_INTERVAL_MS:-10000}
       HEARTBEAT_TIMEOUT_MS: ${HEARTBEAT_TIMEOUT_MS:-30000}

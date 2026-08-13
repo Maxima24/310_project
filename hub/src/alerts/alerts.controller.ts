@@ -1,10 +1,17 @@
 import type { AlertView } from '@cpe310/contracts';
 import { Controller, Get, HttpCode, HttpStatus, Param, Post, Query } from '@nestjs/common';
 
+import { OperatorOnly } from '../common/guards/roles.decorator';
 import { AlertsService } from './alerts.service';
 import { QueryAlertsDto } from './dto/query-alerts.dto';
 
+/**
+ * Operator-only throughout. Acknowledgement in particular must never be reachable
+ * by a sensor token: an intruder who compromised one sensor could otherwise silence
+ * the very alert its tampering raised.
+ */
 @Controller('alerts')
+@OperatorOnly()
 export class AlertsController {
   constructor(private readonly alerts: AlertsService) {}
 
