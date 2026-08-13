@@ -10,10 +10,21 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import numpy as np
 import pytest
 
-from security_agent.evidence import MAX_QUEUED_CLIPS, EvidenceRecorder
+# Evidence capture is a hardware-extras feature: clips are numpy frames written by
+# cv2.VideoWriter. Skip the whole module cleanly when those are absent, so the core
+# suite still runs on a machine that installed only requirements.txt — which is
+# precisely what CI's "without hardware extras" job verifies, and how a stray top-level
+# `import cv2` in the agent code would be caught.
+np = pytest.importorskip(
+    "numpy", reason="video evidence needs numpy (see requirements-hardware.txt)"
+)
+pytest.importorskip(
+    "cv2", reason="video evidence needs OpenCV (see requirements-hardware.txt)"
+)
+
+from security_agent.evidence import MAX_QUEUED_CLIPS, EvidenceRecorder  # noqa: E402
 
 
 def frame(value: int = 128) -> np.ndarray:

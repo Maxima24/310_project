@@ -1,0 +1,295 @@
+name: CI
+
+# Every job starts from a CLEAN CHECKOUT, which is the whole point. The bug this repo
+# shipped with for several commits — nothing generated the Prisma client, so `tsc` had
+# no types to compile against — was invisible on a developer machine that had run
+# `prisma generate` by hand once. It fails immediately here.
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  # Lets a maintainer re-run against a changed toolchain without pushing a commit.
+  workflow_dispatch:
+
+# A new push supersedes an in-flight run for the same ref; no point burning minutes on
+# a commit nobody is waiting for any more.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  # --------------------------------------------------------------- node
+  build-and-test:
+    name: build + test (pnpm ${{ matrix.pnpm }})
+    runs-on: ubuntu-latest
+    strategy:
+      # Report both versions even when one fails — "broken on 10, fine on 9" is the
+      # useful signal, and cancelling the other run hides it.
+      fail-fast: false
+      matrix:
+        # 9 is what packageManager pins and what wrote the lockfile. 10 is what someone
+        # gets from `npm i -g pnpm` today, and it changed two defaults that matter here:
+        # dependency build scripts are blocked unless allowlisted, and it is stricter
+        # about the lockfile. Testing both is how a contributor's global pnpm stops
+        # being a surprise.
+        pnpm: ['9', '10']
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install pnpm ${{ matrix.pnpm }}
+        uses: pnpm/action-setup@v4
+        with:
+          version: ${{ matrix.pnpm }}
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          # Reads .node-version, so CI cannot drift from what the Dockerfiles and
+          # .nvmrc use. Changing the pin in one place changes it everywhere.
+          node-version-file: .node-version
+          cache: pnpm
+
+      # --frozen-lockfile makes a lockfile that does not match package.json a failure
+      # rather than a silent update, which is what keeps CI honest about dependencies.
+      - name: Install
+        run: pnpm install --frozen-lockfile
+
+      # Explicit, separate step: if the Prisma client is ever dropped from the build
+      # lifecycle again, this is where it shows up, with a name that says what broke.
+      - name: Generate Prisma client
+        run: pnpm --filter hub exec prisma generate
+
+      - name: Typecheck
+        run: pnpm lint
+
+      - name: Build
+        run: pnpm build
+
+      - name: Test
+        run: pnpm test
+
+      # The dashboard is only genuinely exercised by a production build — the dev server
+      # tolerates things Rollup rejects, and the CommonJS/ESM contracts problem that
+      # broke this build once surfaced only here.
+      - name: Build dashboard for a split-origin deployment
+        run: pnpm --filter dashboard build
+        env:
+          # Mirrors the Render setup, so a change that only works same-origin fails here
+          # rather than after deploying.
+          VITE_API_BASE: https://hub.example.test
+          VITE_WS_URL: https://hub.example.test
+
+  # --------------------------------------------------------------- python
+  agents:
+    name: agents (python ${{ matrix.python }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # 3.12 is what the agent Docker image pins; 3.14 is what this project's dev
+        # machine runs. The agents must work on both, and OpenCV wheel availability
+        # differs between them — the reason the camera path was unverified for so long.
+        python: ['3.12', '3.14']
+
+    defaults:
+      run:
+        working-directory: agents
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+          cache: pip
+          cache-dependency-path: agents/requirements.txt
+
+      - name: Install
+        run: pip install -r requirements.txt
+
+      # Deliberately NOT installing requirements-hardware.txt: the agents must work
+      # without OpenCV, boto3, or gpiozero, because simulation mode imports them lazily.
+      # If a top-level import creeps in, this job fails and that is the point.
+      - name: Test without hardware extras
+        run: pytest -q
+
+      - name: Install hardware extras
+        run: pip install -r requirements-hardware.txt
+
+      # Re-run with cv2 and boto3 present. The evidence tests only execute for real
+      # here, and the camera test that is skipped above now runs.
+      - name: Test with hardware extras
+        run: pytest -q
+
+  # --------------------------------------------------------------- containers
+  docker:
+    name: docker images
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      # Both images build from the REPO ROOT because of the workspace dependency on
+      # @cpe310/contracts. Getting that context wrong is a classic monorepo mistake that
+      # only shows up in a real build.
+      - name: Build hub image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./hub/Dockerfile
+          push: false
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Build dashboard image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./dashboard/Dockerfile
+          push: false
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  # --------------------------------------------------------------- config
+  config:
+    name: compose + caddy config
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Catches interpolation mistakes without building anything — the kind that only
+      # appear when compose parses the file, such as Caddy's `{$VAR:default}` syntax
+      # accidentally used where compose expects `${VAR:-default}`.
+      - name: Validate compose (base)
+        run: docker compose config --quiet
+
+      - name: Validate compose (Caddy overlay)
+        run: docker compose -f docker-compose.yml -f docker-compose.caddy.yml config --quiet
+
+      # A malformed Caddyfile would otherwise present as a container that starts and
+      # serves nothing.
+      - name: Validate Caddyfile
+        run: |
+          docker run --rm -v "$PWD/deploy/Caddyfile:/etc/caddy/Caddyfile:ro" caddy:2-alpine \
+            caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
+
+      - name: Validate render.yaml is parseable
+        run: python -c "import yaml; yaml.safe_load(open('render.yaml')); print('render.yaml OK')"
+
+  # --------------------------------------------------------------- integration
+  # The tests above mock Prisma, so nothing else proves the schema, the migrations, and
+  # the queries agree. This runs the real hub against a real Postgres.
+  integration:
+    name: migrations + live hub
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: security
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    env:
+      DATABASE_URL: postgresql://postgres:postgres@localhost:5432/security?schema=public
+      AGENT_BOOTSTRAP_KEY: ci-bootstrap-key-not-a-secret
+      OPERATOR_KEY: ci-operator-key-not-a-secret
+      ADMIN_KEY: ci-admin-key-not-a-secret
+      VIEWER_KEY: ci-viewer-key-not-a-secret
+      PORT: '3000'
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: '9'
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .node-version
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      # Proves the committed migrations actually apply to an empty database — a schema
+      # edited without a matching migration passes every unit test and fails here.
+      - name: Apply migrations
+        run: pnpm --filter hub exec prisma migrate deploy
+
+      - name: Build
+        run: pnpm build
+
+      - name: Start the hub
+        run: |
+          node hub/dist/main.js &
+          echo $! > /tmp/hub.pid
+          for i in $(seq 1 30); do
+            if curl -sf http://localhost:3000/health > /dev/null; then
+              echo "hub is up"; exit 0
+            fi
+            sleep 1
+          done
+          echo "hub failed to become healthy"; exit 1
+
+      # A handful of real requests through the real stack. Not a replacement for the
+      # unit suites — this checks the wiring those cannot: that the guard, the policy
+      # layer, and the Prisma queries agree once they are all in one process.
+      - name: Smoke test the API
+        run: |
+          set -euo pipefail
+          fail() { echo "FAIL: $1"; exit 1; }
+
+          code=$(curl -s -o /dev/null -w '%{http_code}' http://localhost:3000/agents)
+          [ "$code" = "401" ] || fail "unauthenticated /agents returned $code, expected 401"
+
+          code=$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $OPERATOR_KEY" \
+            http://localhost:3000/agents)
+          [ "$code" = "200" ] || fail "operator /agents returned $code, expected 200"
+
+          # A viewer must not be able to arm the system.
+          code=$(curl -s -o /dev/null -w '%{http_code}' -X POST \
+            -H "Authorization: Bearer $VIEWER_KEY" -H 'Content-Type: application/json' \
+            -d '{"mode":"away"}' http://localhost:3000/system/mode)
+          [ "$code" = "403" ] || fail "viewer arming returned $code, expected 403"
+
+          # Enrollment issues a token, and that token can report an event as itself.
+          token=$(curl -sf -X POST -H "Authorization: Bearer $AGENT_BOOTSTRAP_KEY" \
+            -H 'Content-Type: application/json' \
+            -d '{"id":"ci-motion","type":"motion","location":"CI"}' \
+            http://localhost:3000/agents/register | python3 -c 'import sys,json; print(json.load(sys.stdin)["enrollment"]["token"])')
+          [ -n "$token" ] || fail "registration returned no token"
+
+          code=$(curl -s -o /dev/null -w '%{http_code}' -X POST \
+            -H "Authorization: Bearer $token" -H 'Content-Type: application/json' \
+            -d "{\"agentId\":\"ci-motion\",\"type\":\"motion_detected\",\"occurredAt\":\"$(date -u +%Y-%m-%dT%H:%M:%S.000Z)\"}" \
+            http://localhost:3000/events)
+          [ "$code" = "201" ] || fail "agent event returned $code, expected 201"
+
+          # And that same token must NOT be able to speak for another agent.
+          code=$(curl -s -o /dev/null -w '%{http_code}' -X POST \
+            -H "Authorization: Bearer $token" -H 'Content-Type: application/json' \
+            -d "{\"agentId\":\"someone-else\",\"type\":\"motion_detected\",\"occurredAt\":\"$(date -u +%Y-%m-%dT%H:%M:%S.000Z)\"}" \
+            http://localhost:3000/events)
+          [ "$code" = "403" ] || fail "cross-agent event returned $code, expected 403"
+
+          echo "smoke test passed"
+
+      - name: Stop the hub
+        if: always()
+        run: kill "$(cat /tmp/hub.pid)" || true

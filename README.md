@@ -294,13 +294,29 @@ not cover.
 **Video evidence:** run a camera with `--record-evidence` and clips land in MinIO, referenced from the
 event's `metadata.clip_url`.
 
-## Tests
+## Tests and CI
 
 ```bash
 pnpm test                   # 200 hub tests
 cd agents && pytest         # 64 agent tests
 pnpm --filter dashboard build   # dashboard typecheck + build
 ```
+
+[.github/workflows/ci.yml](.github/workflows/ci.yml) runs five jobs, every one from a
+**clean checkout** — which is the point, since the bug where nothing generated the
+Prisma client was invisible on a machine that had run `prisma generate` once by hand.
+
+| Job | What it protects against |
+|---|---|
+| `build-and-test` (pnpm **9** and **10**) | A contributor's globally-installed pnpm behaving differently from the pinned one. pnpm 10 blocks dependency build scripts by default; 9 does not |
+| `agents` (Python **3.12** and **3.14**) | Runs pytest **twice** — once with only `requirements.txt`, then again with the hardware extras. The first run is what catches a stray top-level `import cv2`, which would break every simulation-mode deployment |
+| `docker` | Both images build from the repo root. Getting that build context wrong is a classic monorepo mistake that only appears in a real build |
+| `config` | compose interpolation (base **and** Caddy overlay), Caddyfile syntax, and `render.yaml` parseability — a malformed Caddyfile otherwise presents as a container that starts and serves nothing |
+| `integration` | Runs the real hub against a real Postgres: applies the committed migrations to an empty database, then smoke-tests auth end to end. A schema edited without a matching migration passes every unit test and fails only here |
+
+The `integration` smoke test asserts the security properties directly: unauthenticated
+requests are refused, a viewer cannot arm, enrollment issues a working token, and that
+token **cannot** report an event as a different agent.
 
 Hub coverage includes the full mode × event alert matrix, dedup/cooldown, the liveness sweep (startup
 grace, re-entrancy, post-crash reconciliation), the role × permission matrix, the ABAC policies, token
