@@ -2,12 +2,16 @@
 /**
  * Minimal socket.io observer for the hub's live feed.
  *
- *   node tools/ws-client.mjs --key dev-key-change-me
- *   node tools/ws-client.mjs --url http://localhost:3000 --key dev-key-change-me
+ *   node tools/ws-client.mjs --key dev-operator-key-change-me
+ *   node tools/ws-client.mjs --url http://localhost:3000 --key dev-viewer-key-change-me
  *
  * Prints every `event`, `alert`, `mode`, and `agent` frame. Leave it running while
  * arming the system and tripping a sensor — it is the only way to verify the
  * WebSocket auth path, which the HTTP guard does not cover.
+ *
+ * Needs a credential holding `alerts:read`, so a viewer, operator, or admin key works
+ * and an agent token is refused at handshake. A zone-restricted key sees only its own
+ * zones here, exactly as it does over REST.
  *
  * Exit codes: 0 clean shutdown (Ctrl-C), 1 rejected/failed connection.
  */
@@ -15,7 +19,10 @@
 import { io } from 'socket.io-client';
 
 function parseArgs(argv) {
-  const args = { url: process.env.HUB_URL ?? 'http://localhost:3000', key: process.env.AGENT_API_KEY ?? '' };
+  const args = {
+    url: process.env.HUB_URL ?? 'http://localhost:3000',
+    key: process.env.OPERATOR_KEY ?? '',
+  };
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
     if (arg === '--url') args.url = argv[++i];
@@ -28,13 +35,15 @@ function parseArgs(argv) {
 const args = parseArgs(process.argv.slice(2));
 
 if (args.help) {
-  console.log('Usage: node tools/ws-client.mjs [--url http://localhost:3000] [--key <AGENT_API_KEY>]');
+  console.log('Usage: node tools/ws-client.mjs [--url http://localhost:3000] [--key <credential>]');
+  console.log('  Needs a viewer, operator, or admin credential (alerts:read).');
   process.exit(0);
 }
 
 if (!args.key) {
-  console.error('No key. Pass --key <AGENT_API_KEY> or set AGENT_API_KEY.');
-  console.error('  PowerShell: $env:AGENT_API_KEY = "dev-key-change-me"');
+  console.error('No credential. Pass --key <credential> or set OPERATOR_KEY.');
+  console.error('  PowerShell: $env:OPERATOR_KEY = "dev-operator-key-change-me"');
+  console.error('  bash/zsh:   export OPERATOR_KEY=dev-operator-key-change-me');
   process.exit(1);
 }
 
@@ -68,7 +77,7 @@ socket.on('event', (e) => {
 socket.on('alert', (a) => {
   const color = COLORS[a.severity] ?? '';
   const ack = a.acknowledged ? ' (acknowledged)' : '';
-  line('alert', `${a.severity.toUpperCase()} ${a.type} — ${a.message}${ack}`, color);
+  line('alert', `${a.severity.toUpperCase()} ${a.type} - ${a.message}${ack}`, color);
 });
 
 socket.on('mode', (m) => line('mode', `system is now ${m.mode}`, COLORS.warning));
@@ -80,7 +89,8 @@ socket.on('disconnect', (reason) => {
   // The gateway calls disconnect(true) on a bad key, which surfaces here as a
   // server-side disconnect rather than a connect_error.
   if (reason === 'io server disconnect') {
-    console.error('\nThe hub closed the connection. Usually a wrong --key.');
+    console.error('\nThe hub closed the connection. Either the credential is wrong, or it');
+    console.error('lacks alerts:read — an agent token cannot watch the feed.');
     process.exit(1);
   }
 });
