@@ -206,9 +206,9 @@ but refusing is the API's job.
 |---|---|---|
 | `AGENT_BOOTSTRAP_KEY` | `bootstrap` | Enroll an agent. **Nothing else.** |
 | *(issued at enrollment)* | `agent` | Heartbeat and report events **as itself only** |
-| `VIEWER_KEY` | `viewer` | Read agents, events, alerts, arm state |
-| `OPERATOR_KEY` | `operator` | Viewer + acknowledge alerts + arm/disarm |
-| `ADMIN_KEY` | `admin` | Operator + notification audit + policy overrides |
+| `VIEWER_KEY` | `viewer` | Read agents, events, alerts, arm state, reports, schedules |
+| `OPERATOR_KEY` | `operator` | Viewer + acknowledge alerts + arm/disarm + author schedules |
+| `ADMIN_KEY` | `admin` | Operator + notification audit + **audit trail** + browser cameras + policy overrides |
 
 `VIEWER_KEY` and `ADMIN_KEY` are optional — leave one unset and that role does not exist. All configured
 credentials must be **distinct**; a duplicate silently collapses two roles into one, so the hub refuses
@@ -238,8 +238,95 @@ the latter, a zone-restricted viewer would be filtered out of `GET /events` yet 
 in the building over the socket, making the REST filtering decorative. A zoned caller also cannot widen
 its scope with `?agentId=`, and cannot acknowledge alerts from another zone.
 
+**A schedule cannot grant a permission its author lacks.** A schedule that disarms is a delegated disarm,
+so creating one requires `system:disarm` on top of `schedules:write` — otherwise schedules would be a way
+to do indirectly, on a timer, what you may not do directly.
+
 Refusals carry a human-readable reason and the role that could perform the action, so the dashboard can
 explain rather than show a bare 403.
+
+---
+
+## Retention and rollups
+
+Nothing in this system deleted a row until retention existed, so `Event`, `Alert`, and `Notification`
+grew without bound. **Every window defaults to `0`, meaning keep forever** — an upgrade must never
+silently begin deleting a year of evidence.
+
+Hourly **rollups run regardless of those windows.** An hour of one agent's one event type collapses into
+a single counted row: on measured data here, **9,727 events became 71 buckets — a 137:1 row reduction**,
+and unlike a lossy encoding it is exact for the question historical views actually ask ("how much
+activity, where, when"). The Reports page reads rollups where they exist and raw rows for the tail, so it
+keeps working on windows whose individual events are long gone.
+
+Three rules the sweep will not break:
+
+- **An event is never deleted before its hour has been counted.** The prune cutoff is
+  `min(now − window, rollup watermark)`. Get this ordering wrong and history does not shrink, it vanishes.
+- **An unacknowledged alert is never deleted, at any age.** It is unfinished business, and ageing one out
+  silently closes an incident nobody handled.
+- **A pending notification is never deleted.** That queue belongs to the retry worker; deleting a row
+  decides, silently, that nobody needs to be told.
+
+Deletes run in small batches with a pause between them, capped per sweep. One unbounded `DELETE` over a
+million rows holds a long lock, and on this system that means sensor events are refused while housekeeping
+runs — the exact blind spot an intruder would want.
+
+*Why not vector embeddings?* A 384-dim float32 vector is 1,536 bytes; an `Event` row averages ~435 bytes
+including indexes. Embedding would **grow** storage 3–14×, not shrink it, and an embedding cannot be
+reconstructed back into "`door_opened` at 14:32:07 from `door-front`" — which disqualifies it for
+evidence. Vectors are worth adding for *similar-incident search*, as a capability you pay storage for.
+
+---
+
+## Audit trail
+
+`GET /audit`, admin-only, **no write route** — every row is a side effect of an action actually happening,
+and an endpoint that let a caller append to the trail would make the table worthless.
+
+**Denials are recorded, not just successes.** A refused disarm during an active incident is the most
+interesting line this table will ever hold, and it previously existed only as a log line nobody reads.
+
+What it can and cannot tell you: credentials are **shared per-role secrets**, so the hub records the
+**role** (verified from the credential) and, for agent tokens, the **agent id** (verified, since those
+tokens are per-agent). It does not know which *person* acted. An optional `X-Operator-Label` header
+carries a name typed at sign-in; it is stored and displayed as a **claim**, never as identity, and both
+the sign-in form and the audit view say so.
+
+The table deliberately holds **no credential material, not even a hash**. Agent tokens are 256-bit random
+and safe to hash at rest, but the human credentials are operator-chosen with an 8-character floor —
+hashing one here would put the first crackable copy of a secret into the database, to distinguish two
+holders of the same shared key, which it could not do anyway.
+
+Scope: only actions by callers who passed the guard are audited. Authentication failures stay in the
+application log, because a row per rejected request hands any unauthenticated client an unbounded write
+into this table.
+
+---
+
+## Scheduled arming
+
+**A schedule is a transition, not a continuously enforced state.** It fires once when its boundary passes
+and then leaves the system alone. Re-asserting the mode every tick would fight an operator who
+deliberately disarmed to let a contractor in — the wrong behaviour for a security panel. A manual change
+is therefore respected until the next boundary, and **the next boundary still fires**: the usual reason a
+building is left unarmed is that somebody forgot.
+
+- **Local wall time, per schedule.** Each schedule stores an IANA zone, because the hub container runs UTC
+  and a fixed offset would be an hour wrong for half the year. `Intl.DateTimeFormat` does the conversion,
+  so there is no tz dependency to keep current.
+- **Fires exactly once.** `lastFiredFor` holds the local date, and the evaluator claims it with a
+  conditional update. An overlapping tick, a restart mid-loop, or a second instance all lose the race.
+- **A stale boundary is recorded, not acted on.** Past `SCHEDULE_GRACE_MINUTES` (default 60) the miss goes
+  to the audit trail and the schedule is left alone. Disarming at 13:00 because a 07:00 schedule was
+  missed lowers protection at a time nobody chose.
+- **It cannot silence an incident.** A scheduled disarm obeys the same critical-alert rule a human does,
+  with **no admin override** — that override exists so a named person can take responsibility, and a cron
+  job cannot. A held schedule stays unclaimed, so it still arrives if the alert is acknowledged inside the
+  window.
+
+Every fire, hold, and miss is audited with actor `system` — attributing an automatic transition to a
+person would put a name against something no person did.
 
 ---
 
@@ -255,8 +342,22 @@ or permission is a compile error, not a silently dead panel.
   buttons additionally evaluate the disarm policy up front so the padlock carries the reason.
 - Acknowledgement is optimistic (it only dims a row, and rolls back on failure). **Arm changes are not** —
   briefly showing a security panel as disarmed when it is not would be a dangerous lie.
-- The cache is cleared whenever the credential changes, so signing in as a viewer never shows the previous
-  admin session's data.
+- Query keys carry a **session generation** bumped on sign-in and sign-out, so the previous identity's
+  data is unreachable by construction. (An earlier `queryClient.clear()` from a render effect could strand
+  a mounted observer with no query and no fetch in flight — a permanent spinner.)
+
+Four routes, gated by the same permission table the nav is built from, so it can never offer a page the
+hub would refuse:
+
+| Route | Contents |
+|---|---|
+| `/` | Overview — mode, stats, live view, alerts, agents, event stream |
+| `/cameras` | Camera wall, capped at 4 concurrent streams |
+| `/reports` | Daily activity, per-agent and per-type totals, over 7/30/90 days |
+| `/settings` | Schedules, the audit trail (admin), and what retention does |
+
+Deep links work: Caddy serves the SPA with `try_files`, and a URL for a page this credential cannot open
+redirects to the overview rather than 403-ing panel by panel.
 
 ---
 
@@ -297,9 +398,23 @@ event's `metadata.clip_url`.
 ## Tests and CI
 
 ```bash
-pnpm test                   # 200 hub tests
-cd agents && pytest         # 64 agent tests
+pnpm test                   # 325 hub (Jest) + 63 dashboard (Vitest)
+cd agents && pytest         # 66 agent tests
 pnpm --filter dashboard build   # dashboard typecheck + build
+```
+
+There are also three **live** verification scripts that exercise the real service against the real
+Postgres, because the unit tests mock Prisma and therefore prove the code issues the right statements
+rather than that Postgres accepts them. Each restores what it changes and deletes what it creates — a
+verification run must not leave fake incidents in a real security trail.
+
+```bash
+node hub/scripts/verify-retention.cjs   # rollup exactness, prune ordering, unacked alerts survive
+node hub/scripts/verify-audit.cjs       # denials recorded, admin-only, no credential leakage
+node hub/scripts/verify-schedules.cjs   # fires once, held during an incident, stale boundary skipped
+node hub/scripts/verify-cameras.cjs     # provisioning is admin-only; a browser feed cannot pose as a device
+node hub/scripts/verify_stream.py       # MJPEG survives a paused camera; viewer cap returns 429
+python agents/demo_camera.py            # synthetic feed, for testing the live view with no hardware
 ```
 
 [.github/workflows/ci.yml](.github/workflows/ci.yml) runs five jobs, every one from a
@@ -320,7 +435,14 @@ token **cannot** report an event as a different agent.
 
 Hub coverage includes the full mode × event alert matrix, dedup/cooldown, the liveness sweep (startup
 grace, re-entrancy, post-crash reconciliation), the role × permission matrix, the ABAC policies, token
-minting, event ingest ordering, and boot-time env validation. Prisma is mocked, so no database is needed.
+minting, event ingest ordering, boot-time env validation, the MJPEG frame store and viewer cap, retention
+ordering and the never-delete rules, audit recording and its label sanitisation, and the schedule
+evaluator including DST shifts, midnight, and the grace window. Prisma is mocked, so no database is needed.
+
+Dashboard coverage is deliberately concentrated on the security-adjacent logic rather than on markup:
+the client-side mirror of the disarm policy, zone-scoped acknowledgement, alert clustering, the
+reconnect backoff and its jitter, route gating per role, and — as component tests — that the nav cannot
+offer a page the hub would refuse and that the audit view renders a self-asserted name as a *claim*.
 
 Agent coverage includes wire-format shapes (the drift detector against `packages/contracts`), door edge
 detection, camera cooldown and stream-reconnect give-up, transport buffering/retry/re-enrollment, evidence
@@ -373,7 +495,21 @@ All routes require `Authorization: Bearer <credential>` except `GET /health`.
 | GET | `/system/mode` | `system:mode:read` | Current arm state |
 | POST | `/system/mode` | `system:arm` | Set `disarmed` \| `home` \| `away` (policy-checked) |
 | GET | `/notifications` | `notifications:read` | Delivery audit (admin) |
+| GET | `/cameras` | `cameras:view` | Camera status, measured fps, viewer count, origin |
+| POST | `/cameras/:id/ticket` | `cameras:view` | Single-use MJPEG stream ticket |
+| POST | `/cameras/browser-sessions` | `cameras:provision` | Mint a browser publishing token (admin) |
+| DELETE | `/cameras/browser-sessions/:id` | `cameras:provision` | End a browser session immediately |
+| GET | `/schedules` | `schedules:read` | Arm schedules |
+| POST/PUT/DELETE | `/schedules[/:id]` | `schedules:write` + the mode's own permission | Author a schedule |
+| GET | `/reports/summary` | `events:read` + `alerts:read` | Aggregated history (`?days=7\|30\|90&tz=`) |
+| GET | `/audit` | `audit:read` | Who did what, allowed and refused (`?outcome=&action=&since=`) |
 | GET | `/health` | public | Liveness + DB reachability |
+
+There is deliberately **no** `POST /audit`. Every row there is a side effect of an action actually
+happening, so a route that let a caller append to the trail would make the whole table worthless.
+
+There is deliberately **no** `POST /audit`. Write operations send an optional `X-Operator-Label` header
+carrying a self-asserted name, recorded as a claim and never as identity.
 
 WebSocket clients connect with `{ auth: { key } }` and receive `event`, `alert`, `mode`, and `agent`
 messages, zone-filtered. MQTT agents publish to `cpe310/agents/<id>/events` and `.../heartbeat` with
@@ -385,11 +521,42 @@ their token in the payload.
 
 ### Camera
 
+Two supported paths, both reachable from **Cameras → Add**:
+
+| | Runs where | Survives closing the tab | Records evidence clips | Marked |
+|---|---|---|---|---|
+| **This browser** | the operator's browser | no | no | always, as `browser` |
+| **Dedicated device** | the machine the camera is plugged into | yes | yes | as `device` |
+
+**Browser capture** exists because it works in seconds with no install, needs no USB passthrough, and asks
+permission through the browser's own prompt. It is admin-only (`cameras:provision`), capped at 4 concurrent
+sessions, publishes only while the tab is foregrounded, and its token expires in 30 minutes.
+
+It is also the only camera source an operator can fabricate, so the design spends its effort on making
+such a feed **impossible to mistake for hardware** rather than on pretending it is equivalent. The hub
+generates the id (`browser-<random>`), so a browser feed cannot be named after real hardware; `origin` is a
+hub-set column rather than a self-reported capability; and the label appears in the tile caption, **on the
+frame itself** (a fullscreened tile shows only the frame, which is when someone is looking hardest), and in
+the snapshot filename. The honest limit, stated in the code: none of this stops an admin feeding arbitrary
+video in. What it buys is that the feed is labelled at the source, capped, and recorded in the audit trail.
+
+**The device path** is what you would actually deploy. The wizard generates the command and then watches
+for the agent to enrol and start publishing. It never displays the enrollment key — the command references
+`AGENT_BOOTSTRAP_KEY` as an environment variable read from `.env` on the machine the agent runs on, because
+putting that secret on screen would let every operator who can open the page enroll anything.
+
 ```bash
 pip install -r requirements.txt -r requirements-hardware.txt
-python run_agent.py --type camera --id camera-lobby --location "Lobby" --real --source 0
-python run_agent.py --type camera --id camera-gate  --location "Gate"  --real --source rtsp://...
+python run_agent.py --type camera --id camera-lobby --location "Lobby" --real --source 0 --stream
+python run_agent.py --type camera --id camera-gate  --location "Gate"  --real --source rtsp://... --stream
 ```
+
+Note `--stream`: without it the agent enrols, looks healthy, and detects motion while publishing no
+frames, so the tile reads "No signal" with nothing obviously broken. The wizard always includes it.
+
+For testing with no camera at all, `agents/demo_camera.py` publishes synthetic frames — a moving bar and a
+running clock, so a stalled feed is obvious rather than looking like a still room. It uses cv2 only to draw
+and encode, and opens no capture device.
 
 MOG2 background subtraction, shadow pixels thresholded out, morphological opening so one real blob does
 not fragment into sub-threshold specks, then a contour-area threshold (`--min-area`, default 1500 px) and

@@ -80,10 +80,18 @@ export class CredentialService {
     // index hit regardless of fleet size.
     const agent = await this.prisma.agent.findUnique({
       where: { tokenHash: hashToken(credential) },
-      select: { id: true },
+      select: { id: true, tokenExpiresAt: true },
     });
 
     if (!agent) return null;
+
+    // Null means never expires, which is what a dedicated sensor needs — it should keep
+    // working unattended for months. Browser cameras get a short expiry instead, so a
+    // publishing credential cannot outlive the person who created it.
+    if (agent.tokenExpiresAt && agent.tokenExpiresAt.getTime() <= Date.now()) {
+      this.logger.warn(`Rejected expired token for agent ${agent.id}`);
+      return null;
+    }
 
     return {
       role: AuthRole.Agent,

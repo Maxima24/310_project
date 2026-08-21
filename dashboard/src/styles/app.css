@@ -103,6 +103,24 @@ button {
   font-weight: 600;
 }
 
+/* Marks a field as skippable without a second line of prose saying so. */
+.label-optional {
+  margin-left: var(--s1);
+  font-weight: 500;
+  letter-spacing: 0.04em;
+  color: var(--text-4, var(--text-3));
+  opacity: 0.75;
+}
+
+/* Explanatory note under an input. Quiet on purpose — it qualifies the field, it is
+   not a warning, and colour here is reserved for things that are actually wrong. */
+.field-hint {
+  margin: 0;
+  font-size: var(--text-xs);
+  line-height: 1.45;
+  color: var(--text-3);
+}
+
 /* ---------------------------------------------------------------- shell */
 .shell {
   min-height: 100%;
@@ -663,7 +681,13 @@ button {
 
 /* ---------------------------------------------------------------- command bar
    The arm state gets its own band because it is the most consequential control
-   on the page, and its left edge carries the current state as colour. */
+   on the page.
+
+   It used to carry the mode as a coloured left edge. Removed: the mode is already
+   spelled out in words directly inside this bar (ModeControl renders it as
+   `.command-value`), so the rail restated a fact the reader had not yet finished
+   reading. A permanent coloured fixture on a panel that is usually nominal is also
+   the exact shape the colour rule in tokens.css warns about. */
 .command {
   display: flex;
   align-items: center;
@@ -672,24 +696,8 @@ button {
   padding: var(--s4) var(--s5);
   background: var(--surface);
   border: 1px solid var(--line);
-  border-left: 3px solid var(--idle);
   border-radius: var(--r-lg);
   box-shadow: var(--edge);
-}
-
-/* The edge reads as a PROTECTION SCALE, not three unrelated states: full, partial,
-   none. An earlier version painted `away` red, which said "alarm" about the one mode
-   where the building is actually safest. Green appears here because confirming a good
-   state is the entire point of an arm indicator — the exception the colour rule
-   carves out. */
-.command-away {
-  border-left-color: var(--ok);
-}
-.command-home {
-  border-left-color: var(--warn);
-}
-.command-disarmed {
-  border-left-color: var(--line-strong);
 }
 
 .command-state {
@@ -963,29 +971,22 @@ button {
   border-top: 1px solid var(--line-soft);
 }
 
+/* Severity used to be a coloured left edge here too. Removed: every row already
+   states its severity in words with a toned dot beside it (the <Status> in
+   AlertRow), so the rail was a second encoding of the same fact — and because every
+   row had one, the colour marked the routine as loudly as the urgent. */
 .alert {
   display: flex;
   gap: var(--s3);
   padding: var(--s3);
   background: var(--surface-2);
   border: 1px solid var(--line);
-  border-left: 3px solid var(--idle);
   border-radius: var(--r);
-  transition: border-color var(--fast), background var(--fast);
+  transition: background var(--fast);
 }
 
 .alert:hover {
   background: var(--surface-3);
-}
-
-.alert-critical {
-  border-left-color: var(--critical);
-}
-.alert-warning {
-  border-left-color: var(--warn);
-}
-.alert-info {
-  border-left-color: var(--info);
 }
 
 /* Acknowledged alerts recede but stay: the history matters, the urgency does not. */
@@ -1070,12 +1071,11 @@ button {
   background: var(--brand-soft);
 }
 
-/* An offline agent gets ONE cue — a red left edge. Not a tinted card as well as a
-   red border as well as a red badge; three signals for one fact is what made the
-   list feel loud. */
-.agent-offline {
-  border-left: 2px solid var(--critical);
-}
+/* An offline agent gets ONE cue, and it is now the icon tile below rather than a red
+   left edge. Still one signal for one fact — not a tinted card as well as a red
+   border as well as a red badge, which is what made the list feel loud — but carried
+   by an element that is part of the row's content instead of a rail on its edge.
+   The row also says "offline" in words, via <Status tone="critical">. */
 
 .agent-icon {
   width: 36px;
@@ -1571,4 +1571,579 @@ button {
     animation-iteration-count: 1 !important;
     transition-duration: 0.001ms !important;
   }
+}
+
+/* ================================================================ routing */
+
+/* NavLink renders an anchor; the pill styling above assumed a button. */
+.nav-item {
+  text-decoration: none;
+}
+
+.page-sub {
+  font-size: var(--text-sm);
+  color: var(--text-3);
+}
+
+/* A small set of mutually exclusive options, where a dropdown would hide the
+   choices and radios would cost three lines. */
+.segmented {
+  display: flex;
+  gap: 2px;
+  padding: 2px;
+  background: var(--surface-2);
+  border-radius: var(--r-pill);
+  margin-left: auto;
+}
+
+.segmented-item {
+  border: none;
+  background: none;
+  color: var(--text-3);
+  font-size: var(--text-sm);
+  font-weight: 600;
+  padding: var(--s1) var(--s3);
+  border-radius: var(--r-pill);
+  cursor: pointer;
+  transition: color var(--fast), background var(--fast);
+}
+
+.segmented-item:hover {
+  color: var(--text);
+}
+
+.segmented-item.is-active {
+  background: var(--surface);
+  color: var(--text);
+  box-shadow: var(--edge);
+}
+
+/* ================================================================= panels */
+
+.panel-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--s4);
+  flex-wrap: wrap;
+  padding: 0 var(--s5) var(--s4);
+}
+
+.card-body-flush .panel-head {
+  padding-top: var(--s4);
+}
+
+.panel-head .field-hint {
+  max-width: 62ch;
+}
+
+.filter-row {
+  display: flex;
+  gap: var(--s2);
+}
+
+.input-sm {
+  height: 30px;
+  padding: 0 var(--s2);
+  font-size: var(--text-sm);
+}
+
+/* ================================================================= charts */
+
+.chart {
+  display: flex;
+  align-items: flex-end;
+  gap: 2px;
+  height: 160px;
+  padding-top: var(--s2);
+}
+
+.chart-col {
+  flex: 1 1 0;
+  height: 100%;
+  display: flex;
+  align-items: flex-end;
+  min-width: 3px;
+}
+
+.chart-stack {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  display: flex;
+  align-items: flex-end;
+}
+
+.chart-bar {
+  width: 100%;
+  min-height: 2px;
+  background: var(--surface-3);
+  border-radius: 2px 2px 0 0;
+  transition: background var(--fast);
+}
+
+.chart-col:hover .chart-bar {
+  background: var(--line-strong);
+}
+
+/* The only coloured mark on the chart. Activity is the norm and stays neutral;
+   an alert is the exception, so it is the thing that reads at a glance. */
+.chart-bar-alert {
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  background: var(--critical);
+  opacity: 0.85;
+}
+
+.ranked {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.ranked-row {
+  display: grid;
+  grid-template-columns: minmax(90px, 26%) 1fr auto;
+  align-items: center;
+  gap: var(--s3);
+  padding: var(--s2) var(--s5);
+  border-bottom: 1px solid var(--line-soft);
+}
+
+.ranked-row:last-child {
+  border-bottom: none;
+}
+
+.ranked-label {
+  font-size: var(--text-sm);
+  color: var(--text-2);
+  text-transform: capitalize;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ranked-track {
+  height: 6px;
+  background: var(--surface-2);
+  border-radius: var(--r-pill);
+  overflow: hidden;
+}
+
+.ranked-fill {
+  display: block;
+  height: 100%;
+  background: var(--line-strong);
+  border-radius: var(--r-pill);
+}
+
+.ranked-value {
+  font-size: var(--text-sm);
+  font-variant-numeric: tabular-nums;
+  color: var(--text-2);
+}
+
+/* ============================================================== schedules */
+
+.schedule-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  border-top: 1px solid var(--line-soft);
+}
+
+.schedule-row {
+  display: flex;
+  align-items: center;
+  gap: var(--s3);
+  padding: var(--s3) var(--s5);
+  border-bottom: 1px solid var(--line-soft);
+}
+
+.schedule-time {
+  font-size: var(--text-md);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  color: var(--text);
+  min-width: 56px;
+}
+
+.schedule-main {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  flex: 1;
+  min-width: 0;
+}
+
+.schedule-name {
+  font-size: var(--text-base);
+  color: var(--text);
+}
+
+.schedule-meta {
+  font-size: var(--text-xs);
+  color: var(--text-3);
+}
+
+.schedule-actions {
+  display: flex;
+  gap: var(--s1);
+}
+
+.schedule-form {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s4);
+  padding: var(--s5);
+  margin-top: var(--s4);
+  background: var(--surface-2);
+  border-radius: var(--r);
+  box-shadow: var(--edge);
+}
+
+.schedule-form-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+  gap: var(--s4);
+}
+
+.schedule-form-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--s2);
+}
+
+.day-picker {
+  display: flex;
+  gap: var(--s1);
+  flex-wrap: wrap;
+}
+
+.day-chip {
+  min-width: 42px;
+  height: 30px;
+  border: 1px solid var(--line);
+  background: var(--surface);
+  color: var(--text-3);
+  border-radius: var(--r-sm);
+  font-size: var(--text-xs);
+  font-weight: 600;
+  cursor: pointer;
+  transition: all var(--fast);
+}
+
+.day-chip:hover {
+  color: var(--text);
+  border-color: var(--line-strong);
+}
+
+/* Selection is interactive state, so it is the one place brand blue belongs. */
+.day-chip.is-on {
+  background: var(--brand-soft);
+  border-color: var(--brand-line);
+  color: var(--text);
+}
+
+.checkline {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  font-size: var(--text-sm);
+  color: var(--text-2);
+  cursor: pointer;
+}
+
+/* ============================================================ audit trail */
+
+.audit-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  border-top: 1px solid var(--line-soft);
+}
+
+.audit-row {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--s4);
+  padding: var(--s3) var(--s5);
+  border-bottom: 1px solid var(--line-soft);
+}
+
+/* A refusal is the interesting line in this table; everything else is routine
+   and stays neutral, so the eye lands on the exception. */
+.audit-row.is-refused {
+  background: var(--critical-soft);
+}
+
+.audit-when {
+  display: flex;
+  flex-direction: column;
+  min-width: 62px;
+  font-size: var(--text-sm);
+  font-variant-numeric: tabular-nums;
+  color: var(--text-2);
+}
+
+.audit-date {
+  font-size: var(--text-xs);
+  color: var(--text-3);
+}
+
+.audit-body {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  flex: 1;
+  min-width: 0;
+}
+
+.audit-headline {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  font-size: var(--text-base);
+  color: var(--text);
+}
+
+.audit-target {
+  font-size: var(--text-xs);
+  color: var(--text-3);
+  font-family: var(--mono, ui-monospace, monospace);
+}
+
+.audit-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s2);
+  font-size: var(--text-xs);
+  color: var(--text-3);
+}
+
+/* The verified half of "who". */
+.audit-actor {
+  color: var(--text-2);
+  font-weight: 600;
+}
+
+/* The unverified half, deliberately set apart so it cannot be misread as the
+   actor. It is a claim about identity, not identity. */
+.audit-claim {
+  font-style: italic;
+}
+
+.audit-ip {
+  font-family: var(--mono, ui-monospace, monospace);
+}
+
+.audit-reason {
+  font-size: var(--text-sm);
+  color: var(--text-2);
+  line-height: var(--leading);
+  max-width: 80ch;
+}
+
+/* ============================================================== settings */
+
+.settings-facts {
+  list-style: none;
+  margin: var(--s4) 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--s3);
+}
+
+.settings-facts li {
+  display: grid;
+  grid-template-columns: minmax(90px, 130px) 1fr;
+  gap: var(--s4);
+  font-size: var(--text-sm);
+  line-height: var(--leading);
+}
+
+.settings-facts li > span:first-child {
+  color: var(--text-3);
+  font-weight: 600;
+}
+
+.settings-facts li > span:last-child {
+  color: var(--text-2);
+}
+
+/* ================================================================= wizard */
+
+.wizard {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s4);
+  padding: var(--s5);
+}
+
+.wizard-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s4);
+}
+
+.wizard-title {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  margin: 0;
+  font-size: var(--text-md);
+  font-weight: 600;
+  color: var(--text);
+}
+
+.wizard-step {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s3);
+  padding: var(--s4);
+  background: var(--surface-2);
+  border-radius: var(--r);
+  box-shadow: var(--edge);
+}
+
+.wizard-step-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s4);
+  flex-wrap: wrap;
+}
+
+.wizard-step-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--s3);
+  flex-wrap: wrap;
+}
+
+.wizard-step-actions .field-hint {
+  flex: 1;
+  min-width: 220px;
+}
+
+/* A command meant to be copied verbatim. Scrolls rather than wrapping: a wrapped
+   shell line is one someone pastes broken. */
+.codeblock {
+  margin: 0;
+  padding: var(--s3) var(--s4);
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: var(--r-sm);
+  font-family: var(--mono, ui-monospace, monospace);
+  font-size: var(--text-xs);
+  line-height: 1.7;
+  color: var(--text-2);
+  overflow-x: auto;
+  white-space: pre;
+}
+
+.wizard-status {
+  display: flex;
+  align-items: center;
+  gap: var(--s3);
+  padding: var(--s3) var(--s4);
+  background: var(--surface-2);
+  border-radius: var(--r);
+  font-size: var(--text-sm);
+  color: var(--text-2);
+}
+
+.wizard-status strong {
+  font-family: var(--mono, ui-monospace, monospace);
+  color: var(--text);
+}
+
+/* ========================================================= browser capture */
+
+.capture-layout {
+  display: grid;
+  grid-template-columns: minmax(260px, 1fr) minmax(240px, 1fr);
+  gap: var(--s5);
+  align-items: start;
+}
+
+@media (max-width: 720px) {
+  .capture-layout {
+    grid-template-columns: 1fr;
+  }
+}
+
+.capture-preview {
+  position: relative;
+  aspect-ratio: 4 / 3;
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: var(--r);
+  overflow: hidden;
+}
+
+.capture-video {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.capture-overlay {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--s2);
+  background: color-mix(in srgb, var(--bg) 82%, transparent);
+  color: var(--text-2);
+  font-size: var(--text-sm);
+  text-align: center;
+  padding: var(--s4);
+}
+
+.capture-controls {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s4);
+}
+
+.capture-stats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s3);
+  font-size: var(--text-sm);
+  color: var(--text-2);
+}
+
+/* A browser feed is the one camera source an operator can fabricate, so it is marked
+   ON THE FRAME as well as in the caption. Fullscreen shows only the frame, and that is
+   exactly when someone is looking hardest — a badge that vanishes when the picture gets
+   big is absent when it matters most. */
+.camera-origin-badge {
+  position: absolute;
+  top: var(--s2);
+  left: var(--s2);
+  z-index: 2;
+  padding: 2px var(--s2);
+  border-radius: var(--r-sm);
+  background: color-mix(in srgb, var(--warn) 22%, var(--bg));
+  border: 1px solid var(--warn-line);
+  color: var(--warn);
+  font-size: var(--text-xs);
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  pointer-events: none;
+}
+
+/* And a tile treatment, so a wall reads correctly from across a room without anyone
+   having to read the labels. */
+.camera-browser {
+  border-color: var(--warn-line);
 }

@@ -1,4 +1,9 @@
-import type { AlertView, SystemMode } from '@cpe310/contracts';
+import type {
+  AlertView,
+  QueryAuditRequest,
+  SystemMode,
+  UpsertArmScheduleRequest,
+} from '@cpe310/contracts';
 import {
   useMutation,
   useQuery,
@@ -25,6 +30,9 @@ export const qk = {
   mode: (s: number) => ['mode', s] as const,
   cameras: (s: number) => ['cameras', s] as const,
   notifications: (s: number, alertId: string) => ['notifications', s, alertId] as const,
+  schedules: (s: number) => ['schedules', s] as const,
+  audit: (s: number, query: QueryAuditRequest) => ['audit', s, query] as const,
+  reports: (s: number, days: number) => ['reports', s, days] as const,
 };
 
 /** Retained event count, matching the hub's page size. */
@@ -58,7 +66,13 @@ export function useIdentity() {
   });
 }
 
-export function useAgents() {
+/**
+ * `refetchInterval` is a parameter so a component that is genuinely waiting on a change
+ * — the add-camera wizard watching for an agent to enrol — can ask for a faster poll
+ * without a second query or a bespoke loop. TanStack uses the shortest interval among
+ * live observers and reverts to this default when that component unmounts.
+ */
+export function useAgents(refetchInterval = 15_000) {
   const session = useSession();
   return useQuery({
     queryKey: qk.agents(session),
@@ -67,7 +81,7 @@ export function useAgents() {
     // secondsSinceLastSeen is computed by the hub per request, so it would freeze
     // between socket pushes. A slow poll keeps the "last seen" column honest without
     // making the WebSocket redundant.
-    refetchInterval: 15_000,
+    refetchInterval,
   });
 }
 
@@ -223,6 +237,64 @@ export function upsertAlert(
   queryClient.setQueryData<AlertView[]>(qk.alerts(session), (current) => {
     const rest = (current ?? []).filter((a) => a.id !== alert.id);
     return [alert, ...rest].slice(0, MAX_ALERTS);
+  });
+}
+
+export function useSchedules(enabled = true) {
+  const session = useSession();
+  return useQuery({
+    queryKey: qk.schedules(session),
+    queryFn: api.schedules,
+    enabled,
+    retry: retryUnlessAuth,
+    // A schedule that fired changes lastFiredAt, and the evaluator ticks every 30s.
+    refetchInterval: 60_000,
+  });
+}
+
+export function useSaveSchedule() {
+  const queryClient = useQueryClient();
+  const session = useSession();
+
+  return useMutation({
+    mutationFn: ({ id, input }: { id?: string; input: UpsertArmScheduleRequest }) =>
+      id ? api.updateSchedule(id, input) : api.createSchedule(input),
+    // Refetched rather than merged: the hub re-seeds lastFiredFor when a boundary moves,
+    // so the row that comes back is not simply the row that was sent.
+    onSuccess: () => void queryClient.invalidateQueries({ queryKey: qk.schedules(session) }),
+  });
+}
+
+export function useDeleteSchedule() {
+  const queryClient = useQueryClient();
+  const session = useSession();
+
+  return useMutation({
+    mutationFn: (id: string) => api.deleteSchedule(id),
+    onSuccess: () => void queryClient.invalidateQueries({ queryKey: qk.schedules(session) }),
+  });
+}
+
+/** Admin-only; `enabled` lets a non-admin skip the request rather than eat a 403. */
+export function useAudit(query: QueryAuditRequest, enabled: boolean) {
+  const session = useSession();
+  return useQuery({
+    queryKey: qk.audit(session, query),
+    queryFn: () => api.audit(query),
+    enabled,
+    retry: retryUnlessAuth,
+  });
+}
+
+export function useReports(days: number, enabled: boolean) {
+  const session = useSession();
+  return useQuery({
+    queryKey: qk.reports(session, days),
+    queryFn: () => api.reports(days),
+    enabled,
+    retry: retryUnlessAuth,
+    // Aggregates over days; refetching them on every focus would be pure cost.
+    staleTime: 5 * 60_000,
   });
 }
 

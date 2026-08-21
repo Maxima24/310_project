@@ -83,6 +83,16 @@ services:
       HEARTBEAT_INTERVAL_MS: ${HEARTBEAT_INTERVAL_MS:-10000}
       HEARTBEAT_TIMEOUT_MS: ${HEARTBEAT_TIMEOUT_MS:-30000}
       ALERT_COOLDOWN_MS: ${ALERT_COOLDOWN_MS:-60000}
+      # Retention. 0 = keep forever, which is the default here too: bringing the stack
+      # up must never begin deleting evidence you did not ask it to delete. Hourly
+      # rollups run regardless, so history is summarised from first boot.
+      RETENTION_EVENT_DAYS: ${RETENTION_EVENT_DAYS:-0}
+      RETENTION_ALERT_DAYS: ${RETENTION_ALERT_DAYS:-0}
+      RETENTION_NOTIFICATION_DAYS: ${RETENTION_NOTIFICATION_DAYS:-0}
+      RETENTION_AUDIT_DAYS: ${RETENTION_AUDIT_DAYS:-0}
+      # Scheduled arming. A boundary missed by more than this is recorded rather than
+      # acted on, so a hub that was down does not change the mode hours late.
+      SCHEDULE_GRACE_MINUTES: ${SCHEDULE_GRACE_MINUTES:-60}
       CORS_ORIGIN: '*'
       # Notification fan-out. Mailpit accepts anything, so email works out of the box;
       # point SMTP_HOST at a real provider and set credentials for production.

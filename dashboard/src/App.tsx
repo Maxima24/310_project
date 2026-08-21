@@ -1,10 +1,15 @@
 import { useEffect } from 'react';
+import { BrowserRouter, Navigate, Route, Routes } from 'react-router-dom';
 
-import { Dashboard } from './Dashboard';
+import { Shell } from './Shell';
 import { SignIn } from './components/SignIn';
 import { ApiError } from './lib/api';
 import { useIdentity } from './lib/queries';
 import { AuthProvider } from './lib/permissions';
+import { CamerasPage } from './pages/CamerasPage';
+import { Overview } from './pages/Overview';
+import { ReportsPage } from './pages/ReportsPage';
+import { SettingsPage } from './pages/SettingsPage';
 import { useSessionStore } from './stores/session.store';
 
 /**
@@ -59,7 +64,19 @@ export function App() {
 
   return (
     <AuthProvider identity={identity.data}>
-      <Dashboard />
+      <BrowserRouter>
+        <Routes>
+          <Route element={<Shell />}>
+            <Route path="/" element={<Overview />} />
+            <Route path="/cameras" element={<CamerasPage />} />
+            <Route path="/reports" element={<ReportsPage />} />
+            <Route path="/settings" element={<SettingsPage />} />
+            {/* An unknown URL lands on the overview rather than a blank shell — on an
+                operations console, "where am I" should never be a question. */}
+            <Route path="*" element={<Navigate to="/" replace />} />
+          </Route>
+        </Routes>
+      </BrowserRouter>
     </AuthProvider>
   );
 }

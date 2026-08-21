@@ -13,7 +13,7 @@ const ADMIN = 'a-real-admin-secret';
 const ZONES = ['Hallway', 'Lobby'];
 
 async function buildService(
-  agentForHash: { id: string } | null = null,
+  agentForHash: { id: string; tokenExpiresAt?: Date | null } | null = null,
   overrides: { viewer?: string; admin?: string } = { viewer: VIEWER, admin: ADMIN },
 ) {
   const prisma = {
@@ -108,8 +108,38 @@ describe('CredentialService.resolve', () => {
     // Looked up by hash, never by plaintext — the hub stores no plaintext to match.
     expect(prisma.agent.findUnique).toHaveBeenCalledWith({
       where: { tokenHash: hashToken(token) },
-      select: { id: true },
+      select: { id: true, tokenExpiresAt: true },
     });
+  });
+
+  it('accepts a token with no expiry, which is what a dedicated device has', async () => {
+    const { token } = mintAgentToken();
+    const { service } = await buildService({ id: 'door-front', tokenExpiresAt: null });
+
+    expect((await service.resolve(token))?.agentId).toBe('door-front');
+  });
+
+  it('refuses an EXPIRED token', async () => {
+    // Browser cameras get a short expiry so a publishing credential cannot outlive the
+    // person who created it. Enforced here rather than at the publish endpoint, so it
+    // covers every route the token could reach.
+    const { token } = mintAgentToken();
+    const { service } = await buildService({
+      id: 'browser-abc123',
+      tokenExpiresAt: new Date(Date.now() - 1_000),
+    });
+
+    await expect(service.resolve(token)).resolves.toBeNull();
+  });
+
+  it('accepts a token whose expiry is still ahead', async () => {
+    const { token } = mintAgentToken();
+    const { service } = await buildService({
+      id: 'browser-abc123',
+      tokenExpiresAt: new Date(Date.now() + 60_000),
+    });
+
+    expect((await service.resolve(token))?.agentId).toBe('browser-abc123');
   });
 
   it('returns null for a token-shaped string that no agent owns', async () => {

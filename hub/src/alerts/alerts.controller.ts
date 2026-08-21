@@ -1,4 +1,4 @@
-import type { AlertView } from '@cpe310/contracts';
+import { AuditAction, AuditOutcome, type AlertView } from '@cpe310/contracts';
 import {
   Controller,
   ForbiddenException,
@@ -11,6 +11,7 @@ import {
   Req,
 } from '@nestjs/common';
 
+import { AuditService } from '../audit/audit.service';
 import type { AuthenticatedRequest } from '../common/guards/auth.guard';
 import { CanAcknowledge, CanReadAlerts } from '../common/guards/permissions.decorator';
 import { PolicyService } from '../common/security/policy.service';
@@ -22,6 +23,7 @@ export class AlertsController {
   constructor(
     private readonly alerts: AlertsService,
     private readonly policy: PolicyService,
+    private readonly audit: AuditService,
   ) {}
 
   /** Viewers and above; zone-restricted callers see only their own zones. */
@@ -48,10 +50,34 @@ export class AlertsController {
     @Param('id') id: string,
     @Req() request: AuthenticatedRequest,
   ): Promise<AlertView> {
+    const actor = this.audit.actorFromRequest(request);
     const decision = await this.policy.canAcknowledgeAlert(request.identity!, id);
+
     if (!decision.allowed) {
+      await this.audit.record({
+        ...actor,
+        action: AuditAction.AlertAcknowledged,
+        outcome: AuditOutcome.Denied,
+        reason: decision.reason,
+        targetType: 'alert',
+        targetId: id,
+      });
       throw new ForbiddenException(decision.reason);
     }
-    return this.alerts.acknowledge(id);
+
+    const alert = await this.alerts.acknowledge(id);
+
+    // Acknowledging is the act of taking responsibility for an incident, so the record
+    // of who did it carries the same weight as the alert itself.
+    await this.audit.record({
+      ...actor,
+      action: AuditAction.AlertAcknowledged,
+      outcome: AuditOutcome.Allowed,
+      targetType: 'alert',
+      targetId: id,
+      detail: { type: alert.type, severity: alert.severity, agentId: alert.agentId },
+    });
+
+    return alert;
   }
 }

@@ -28,7 +28,22 @@
 	}
 
 	# Compress before it leaves the proxy. The event feed is JSON and compresses well.
-	encode zstd gzip
+	#
+	# The match list is NOT optional decoration. `multipart/x-mixed-replace` — the live
+	# camera stream — must never be compressed: a compressor buffers, and a buffered
+	# live view arrives in bursts seconds late, which on a security console is worse
+	# than no picture because it looks current. Caddy's default allowlist happens to
+	# exclude that type today, so this used to work by luck; naming the types we DO
+	# want makes the guarantee explicit and survives a Caddy upgrade.
+	encode zstd gzip {
+		match {
+			header Content-Type text/*
+			header Content-Type application/json*
+			header Content-Type application/javascript*
+			header Content-Type application/wasm*
+			header Content-Type image/svg+xml*
+		}
+	}
 
 	# --- WebSocket -----------------------------------------------------------
 	# Must come BEFORE the /api rule and must NOT strip its prefix: socket.io needs
@@ -48,18 +63,39 @@
 			# makes the guard's rejection warnings useless for tracing an attacker.
 			header_up X-Real-IP {remote_host}
 			header_up X-Forwarded-Proto {scheme}
+
+			# Flush every write straight through. Caddy auto-detects text/event-stream
+			# but not multipart/x-mixed-replace, so without this the MJPEG camera feed
+			# is at the mercy of default buffering. -1 means "no buffering at all".
+			flush_interval -1
 		}
 	}
 
-	# --- Dashboard -----------------------------------------------------------
+	# --- Dashboard: hashed assets --------------------------------------------
+	#
+	# Handled separately from the app document, and NOT covered by the SPA fallback
+	# below. That distinction is the whole point: a bundle filename contains a content
+	# hash, so a request for one that no longer exists means the caller is working from
+	# a stale document and the honest answer is 404. Letting it fall through to
+	# try_files returns index.html with a 200 instead, and the browser then tries to
+	# parse a web page as JavaScript — which fails silently and presents as an app that
+	# loads but does nothing.
+	handle /assets/* {
+		root * /srv
+		# Immutable by construction: the content hash is in the name.
+		header Cache-Control "public, max-age=31536000, immutable"
+		file_server
+	}
+
+	# --- Dashboard: the app document -----------------------------------------
 	handle {
 		root * /srv
-		# Hashed asset filenames are immutable, so they can be cached hard. index.html
-		# must not be, or a deploy leaves browsers pinned to a stale bundle that
-		# references assets which no longer exist.
-		@assets path /assets/*
-		header @assets Cache-Control "public, max-age=31536000, immutable"
-		header /index.html Cache-Control "no-cache"
+
+		# Applied to the RESPONSE for every client-side route, not just the literal
+		# /index.html. Matching on the filename was wrong: browsers request `/`, which
+		# never matched, so the document was served with no cache directive at all and
+		# heuristically cached — pinning people to a bundle that a deploy had removed.
+		header Cache-Control "no-cache"
 
 		# Single-page app: unknown paths are client-side routes, not 404s.
 		try_files {path} /index.html

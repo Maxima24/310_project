@@ -51,6 +51,25 @@ export const Permission = {
   CamerasView: 'cameras:view',
   /** A camera agent pushing its own frames. */
   CamerasPublish: 'cameras:publish',
+  /**
+   * Minting a publishing credential for a browser to act as a camera.
+   *
+   * ADMIN ONLY, and the reason is the shared-secret model: credentials here are per
+   * role, not per person, so granting this to operators would let everyone holding the
+   * operator key create publishing identities. Issuing a credential is an admin act.
+   */
+  CamerasProvision: 'cameras:provision',
+  /** The audit trail: who changed the mode, who cleared an alert, who was refused. */
+  AuditRead: 'audit:read',
+  SchedulesRead: 'schedules:read',
+  /**
+   * Creating or editing a schedule. Holding this is NOT sufficient on its own: a
+   * schedule that disarms is a delegated disarm, so the policy layer additionally
+   * requires the caller to hold the arm/disarm permission the schedule would exercise.
+   * Otherwise this permission would be a way to do indirectly what you may not do
+   * directly, on a timer.
+   */
+  SchedulesWrite: 'schedules:write',
 } as const;
 
 export type Permission = (typeof Permission)[keyof typeof Permission];
@@ -61,6 +80,8 @@ const VIEWER_PERMISSIONS: Permission[] = [
   Permission.AlertsRead,
   Permission.SystemModeRead,
   Permission.CamerasView,
+  // Reading schedules is part of understanding why the system is in the mode it is in.
+  Permission.SchedulesRead,
 ];
 
 const OPERATOR_PERMISSIONS: Permission[] = [
@@ -68,6 +89,7 @@ const OPERATOR_PERMISSIONS: Permission[] = [
   Permission.AlertsAck,
   Permission.SystemArm,
   Permission.SystemDisarm,
+  Permission.SchedulesWrite,
 ];
 
 /**
@@ -87,7 +109,15 @@ export const ROLE_PERMISSIONS: Record<AuthRole, readonly Permission[]> = {
   ],
   [AuthRole.Viewer]: VIEWER_PERMISSIONS,
   [AuthRole.Operator]: OPERATOR_PERMISSIONS,
-  [AuthRole.Admin]: [...OPERATOR_PERMISSIONS, Permission.NotificationsRead],
+  [AuthRole.Admin]: [
+    ...OPERATOR_PERMISSIONS,
+    Permission.NotificationsRead,
+    // Admin-only, and not because the contents are secret. An audit trail readable by
+    // the people it records invites tidying, and its whole value is that it is written
+    // by the system rather than curated by its subjects.
+    Permission.AuditRead,
+    Permission.CamerasProvision,
+  ],
 };
 
 export function permissionsForRole(role: AuthRole): readonly Permission[] {

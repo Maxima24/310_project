@@ -218,6 +218,79 @@ export class EnvVars {
   @IsEnum(SeverityLevel)
   LOG_MIN_SEVERITY: SeverityLevel = SeverityLevel.Info;
 
+  // --- Retention -----------------------------------------------------------
+  //
+  // Nothing in this system deleted anything until now, so Event, Alert, and
+  // Notification grew without bound. Every window below defaults to 0, meaning KEEP
+  // FOREVER: an upgrade must never silently begin deleting a year of evidence. This
+  // matches how the notification channels behave — inert until deliberately configured.
+
+  @IsString()
+  @IsNotEmpty()
+  RETENTION_SWEEP_CRON: string = '0 30 3 * * *';
+
+  /** Highest-volume table by far. 0 = keep forever. */
+  @IsInt()
+  @Min(0)
+  RETENTION_EVENT_DAYS: number = 0;
+
+  /** Acknowledged alerts only — see RetentionService. 0 = keep forever. */
+  @IsInt()
+  @Min(0)
+  RETENTION_ALERT_DAYS: number = 0;
+
+  /** Terminal notifications only; pending ones are the retry worker's queue. */
+  @IsInt()
+  @Min(0)
+  RETENTION_NOTIFICATION_DAYS: number = 0;
+
+  /**
+   * The audit trail. Deliberately the window you would set LONGEST: it is the smallest
+   * table by far and the one whose value is entirely in how far back it goes. 365 is
+   * the sensible first non-zero value.
+   */
+  @IsInt()
+  @Min(0)
+  RETENTION_AUDIT_DAYS: number = 0;
+
+  /** Rows per delete. Small enough that each statement is short-lived. */
+  @IsInt()
+  @Min(100)
+  @Max(10_000)
+  RETENTION_BATCH_SIZE: number = 1_000;
+
+  /**
+   * Caps one cycle's work so a huge first prune drains over successive nights instead
+   * of in one pass that competes with ingestion for hours.
+   */
+  @IsInt()
+  @Min(1)
+  RETENTION_MAX_BATCHES: number = 50;
+
+  /** Yield between batches, so a prune is never why an event POST waits for a connection. */
+  @IsInt()
+  @Min(0)
+  RETENTION_BATCH_PAUSE_MS: number = 100;
+
+  // --- Scheduled arming -----------------------------------------------------
+
+  /** How often boundaries are checked. 30s keeps worst-case lateness under a minute. */
+  @IsString()
+  @IsNotEmpty()
+  SCHEDULE_TICK_CRON: string = '*/30 * * * * *';
+
+  /**
+   * How late a boundary may be and still fire, in minutes.
+   *
+   * Covers the hub-was-down case without acting on a boundary hours stale: disarming a
+   * building at 13:00 because a 07:00 schedule was missed lowers protection at a time
+   * nobody chose. Past this, the miss is recorded and the schedule left alone.
+   */
+  @IsInt()
+  @Min(0)
+  @Max(720)
+  SCHEDULE_GRACE_MINUTES: number = 60;
+
   // --- MQTT ingestion (roadmap item 4) --------------------------------------
   // Unset means HTTP-only, which stays the default. Set to enable the second
   // transport alongside REST, e.g. mqtt://mosquitto:1883.
@@ -237,6 +310,14 @@ const NUMERIC_KEYS = [
   'NOTIFY_MAX_ATTEMPTS',
   'SMTP_PORT',
   'ALERT_WEBHOOK_TIMEOUT_MS',
+  'RETENTION_EVENT_DAYS',
+  'RETENTION_ALERT_DAYS',
+  'RETENTION_NOTIFICATION_DAYS',
+  'RETENTION_AUDIT_DAYS',
+  'RETENTION_BATCH_SIZE',
+  'RETENTION_MAX_BATCHES',
+  'RETENTION_BATCH_PAUSE_MS',
+  'SCHEDULE_GRACE_MINUTES',
 ] as const;
 
 /** Keys that arrive as strings but must be booleans. */
@@ -312,6 +393,22 @@ export function validateEnv(raw: Record<string, unknown>): EnvVars {
   if (config.EVENTS_PAGE_LIMIT > config.EVENTS_PAGE_MAX) {
     throw new Error(
       `EVENTS_PAGE_LIMIT (${config.EVENTS_PAGE_LIMIT}) cannot exceed EVENTS_PAGE_MAX (${config.EVENTS_PAGE_MAX}).`,
+    );
+  }
+
+  // A notification is the record of whether anyone was actually told about an alert.
+  // Pruning it while its alert survives leaves an alert nobody can answer that question
+  // for, which is worse than having no audit at all — it looks complete and is not.
+  // 0 means keep forever, so it is the longest window rather than the shortest.
+  const forever = Number.POSITIVE_INFINITY;
+  const alertWindow = config.RETENTION_ALERT_DAYS || forever;
+  const notificationWindow = config.RETENTION_NOTIFICATION_DAYS || forever;
+
+  if (notificationWindow < alertWindow) {
+    throw new Error(
+      `RETENTION_NOTIFICATION_DAYS (${config.RETENTION_NOTIFICATION_DAYS}) is shorter than ` +
+        `RETENTION_ALERT_DAYS (${config.RETENTION_ALERT_DAYS}); delivery records would be deleted ` +
+        'while the alerts they explain are still on file. Note 0 means keep forever.',
     );
   }
 

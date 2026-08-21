@@ -69,6 +69,16 @@ export function usePermissions() {
     canArm: has(Permission.SystemArm),
     canDisarm: has(Permission.SystemDisarm),
     canReadNotifications: has(Permission.NotificationsRead),
+    // Knowing a camera exists and being allowed to look through it are different
+    // things, and the hub enforces the second. The live view used to gate itself on
+    // AgentsRead, so it would have offered a picture the API refuses the moment either
+    // permission set is edited.
+    canViewCameras: has(Permission.CamerasView),
+    /** Minting a publishing credential for a browser. Admin only — see the permission. */
+    canProvisionCameras: has(Permission.CamerasProvision),
+    canReadAudit: has(Permission.AuditRead),
+    canReadSchedules: has(Permission.SchedulesRead),
+    canWriteSchedules: has(Permission.SchedulesWrite),
   };
 }
 

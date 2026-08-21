@@ -25,9 +25,34 @@ export type IconName =
   | 'clip'
   | 'chevron'
   | 'logout'
-  | 'dots';
+  | 'dots'
+  | 'clock'
+  | 'plus'
+  | 'trash'
+  | 'history';
 
 const PATHS: Record<IconName, JSX.Element> = {
+  clock: (
+    <>
+      <circle cx="12" cy="12" r="8.5" />
+      <path d="M12 7v5.2l3.4 2" />
+    </>
+  ),
+  plus: <path d="M12 5.5v13M5.5 12h13" />,
+  trash: (
+    <>
+      <path d="M4.5 7h15M9.5 7V4.8h5V7M6.5 7l.9 12.2a1 1 0 001 .8h7.2a1 1 0 001-.8L17.5 7" />
+      <path d="M10.5 11v5.5M13.5 11v5.5" />
+    </>
+  ),
+  // A clock with the hand running backwards — the audit trail is history, not the time.
+  history: (
+    <>
+      <path d="M4.2 12a7.8 7.8 0 103-6.2" />
+      <path d="M4 4.6V9h4.4" />
+      <path d="M12 8v4.3l3 1.8" />
+    </>
+  ),
   shield: <path d="M12 3l7 3v6c0 4.2-2.9 7.6-7 9-4.1-1.4-7-4.8-7-9V6l7-3z" />,
   home: <path d="M4 10.5L12 4l8 6.5V19a1 1 0 01-1 1h-4v-6H9v6H5a1 1 0 01-1-1v-8.5z" />,
   camera: (

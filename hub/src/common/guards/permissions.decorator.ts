@@ -34,3 +34,4 @@ export const CanAcknowledge = () => RequirePermissions(Permission.AlertsAck);
 
 /** Admin-only. */
 export const CanReadNotifications = () => RequirePermissions(Permission.NotificationsRead);
+export const CanReadAudit = () => RequirePermissions(Permission.AuditRead);

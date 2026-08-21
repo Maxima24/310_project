@@ -1,6 +1,12 @@
-import type { AgentAckResponse, AgentView } from '@cpe310/contracts';
+import {
+  AuditAction,
+  AuditOutcome,
+  type AgentAckResponse,
+  type AgentView,
+} from '@cpe310/contracts';
 import { Body, Controller, Get, HttpCode, HttpStatus, Param, Post, Req } from '@nestjs/common';
 
+import { AuditService } from '../audit/audit.service';
 import type { AuthenticatedRequest } from '../common/guards/auth.guard';
 import {
   CanEnrollAgents,
@@ -12,17 +18,41 @@ import { RegisterAgentDto } from './dto/register-agent.dto';
 
 @Controller('agents')
 export class AgentsController {
-  constructor(private readonly agents: AgentsService) {}
+  constructor(
+    private readonly agents: AgentsService,
+    private readonly audit: AuditService,
+  ) {}
 
   /**
    * Enrollment. The bootstrap key gets an agent exactly one thing — a token of its
    * own — and cannot be used for anything else.
+   *
+   * A re-enrollment is audited as a ROTATION rather than an enrollment, because that
+   * is the security-relevant event: it silently invalidates the token the previous
+   * holder had. Legitimate when an agent loses its token file, and also exactly what
+   * someone who stole the bootstrap key would do — which is why it needs to be
+   * queryable rather than buried in a log.
    */
   @Post('register')
   @CanEnrollAgents()
   @HttpCode(HttpStatus.OK)
-  register(@Body() dto: RegisterAgentDto): Promise<AgentAckResponse> {
-    return this.agents.register(dto);
+  async register(
+    @Body() dto: RegisterAgentDto,
+    @Req() request: AuthenticatedRequest,
+  ): Promise<AgentAckResponse> {
+    const result = await this.agents.register(dto);
+    const rotated = result.enrollment?.rotated ?? false;
+
+    await this.audit.record({
+      ...this.audit.actorFromRequest(request),
+      action: rotated ? AuditAction.AgentTokenRotated : AuditAction.AgentEnrolled,
+      outcome: AuditOutcome.Allowed,
+      targetType: 'agent',
+      targetId: dto.id,
+      detail: { type: dto.type, location: dto.location, version: dto.version ?? null },
+    });
+
+    return result;
   }
 
   /** The guard additionally enforces that `:id` matches the calling token's agent. */

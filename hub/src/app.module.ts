@@ -5,6 +5,7 @@ import { ScheduleModule } from '@nestjs/schedule';
 
 import { AgentsModule } from './agents/agents.module';
 import { AlertsModule } from './alerts/alerts.module';
+import { AuditModule } from './audit/audit.module';
 import { AuthModule } from './auth/auth.module';
 import { CamerasModule } from './cameras/cameras.module';
 import { AuthGuard } from './common/guards/auth.guard';
@@ -13,9 +14,12 @@ import { SecurityModule } from './common/security/security.module';
 import { loadConfiguration } from './config/configuration';
 import { EventsModule } from './events/events.module';
 import { HealthController } from './health.controller';
+import { MaintenanceModule } from './maintenance/maintenance.module';
 import { MqttModule } from './mqtt/mqtt.module';
 import { NotificationsModule } from './notifications/notifications.module';
 import { RealtimeModule } from './realtime/realtime.module';
+import { ReportsModule } from './reports/reports.module';
+import { SchedulesModule } from './schedules/schedules.module';
 import { SystemModule } from './system/system.module';
 
 @Module({
@@ -30,6 +34,8 @@ import { SystemModule } from './system/system.module';
     ScheduleModule.forRoot(),
     PrismaModule,
     SecurityModule,
+    // Global, and registered before the feature modules that record into it.
+    AuditModule,
     AuthModule,
     RealtimeModule,
     SystemModule,
@@ -39,6 +45,9 @@ import { SystemModule } from './system/system.module';
     EventsModule,
     CamerasModule,
     MqttModule,
+    MaintenanceModule,
+    SchedulesModule,
+    ReportsModule,
   ],
   controllers: [HealthController],
   providers: [

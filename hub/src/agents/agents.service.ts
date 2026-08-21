@@ -1,10 +1,11 @@
 import {
   AgentStatus,
+  BROWSER_CAMERA_ID_PREFIX,
   type AgentAckResponse,
   type AgentView,
   type RegisterAgentRequest,
 } from '@cpe310/contracts';
-import { Injectable, Logger, NotFoundException } from '@nestjs/common';
+import { BadRequestException, Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import type { Agent } from '@prisma/client';
 
@@ -35,6 +36,17 @@ export class AgentsService {
    * therefore idempotent and safe to retry, which the Python transport relies on.
    */
   async register(dto: RegisterAgentRequest): Promise<AgentAckResponse> {
+    // The browser-camera namespace is reserved to the hub. Without this check, a holder
+    // of the bootstrap key could enroll `browser-abc123` from the device path and produce
+    // a feed that the UI labels as browser-origin while it is nothing of the kind — or,
+    // worse, collide with a live session and rotate its token out from under it.
+    if (dto.id.startsWith(BROWSER_CAMERA_ID_PREFIX)) {
+      throw new BadRequestException(
+        `Ids beginning with "${BROWSER_CAMERA_ID_PREFIX}" are reserved for browser cameras, ` +
+          'which the hub names itself.',
+      );
+    }
+
     const previous = await this.prisma.agent.findUnique({ where: { id: dto.id } });
 
     // Every registration mints a fresh token. Rotation-on-enroll means a token
@@ -200,6 +212,7 @@ export function toAgentView(agent: Agent, now: number = Date.now()): AgentView {
     status: agent.status,
     version: agent.version,
     capabilities: agent.capabilities,
+    origin: agent.origin,
     registeredAt: agent.registeredAt.toISOString(),
     lastSeenAt: agent.lastSeenAt.toISOString(),
     secondsSinceLastSeen: Math.max(

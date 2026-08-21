@@ -60,6 +60,22 @@ export interface AppConfig {
     /** Undefined means HTTP-only ingestion. */
     url?: string;
   };
+  schedules: {
+    tickCron: string;
+    /** How late a boundary may be and still fire. */
+    graceMinutes: number;
+  };
+  retention: {
+    sweepCron: string;
+    /** Days to keep each table. 0 means keep forever. */
+    eventDays: number;
+    alertDays: number;
+    notificationDays: number;
+    auditDays: number;
+    batchSize: number;
+    maxBatches: number;
+    batchPauseMs: number;
+  };
 }
 
 export function loadConfiguration(): AppConfig {
@@ -120,6 +136,20 @@ export function loadConfiguration(): AppConfig {
     },
     mqtt: {
       url: env.MQTT_URL,
+    },
+    schedules: {
+      tickCron: env.SCHEDULE_TICK_CRON,
+      graceMinutes: env.SCHEDULE_GRACE_MINUTES,
+    },
+    retention: {
+      sweepCron: env.RETENTION_SWEEP_CRON,
+      eventDays: env.RETENTION_EVENT_DAYS,
+      alertDays: env.RETENTION_ALERT_DAYS,
+      notificationDays: env.RETENTION_NOTIFICATION_DAYS,
+      auditDays: env.RETENTION_AUDIT_DAYS,
+      batchSize: env.RETENTION_BATCH_SIZE,
+      maxBatches: env.RETENTION_MAX_BATCHES,
+      batchPauseMs: env.RETENTION_BATCH_PAUSE_MS,
     },
   };
 }

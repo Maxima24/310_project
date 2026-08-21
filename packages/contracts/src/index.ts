@@ -9,9 +9,12 @@
  */
 export * from './agent';
 export * from './alert';
+export * from './audit';
 export * from './auth';
 export * from './camera';
 export * from './event';
 export * from './mode';
 export * from './notification';
+export * from './report';
+export * from './schedule';
 export * from './ws';

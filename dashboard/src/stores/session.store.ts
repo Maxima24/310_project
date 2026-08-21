@@ -17,8 +17,27 @@ export type ConnectionState = 'idle' | 'connecting' | 'live' | 'rejected' | 'off
  */
 const STORAGE_KEY = 'cpe310.operatorKey';
 
+/**
+ * The operator's name, sent with every write so the audit trail reads as a shift log
+ * rather than a list of anonymous role changes.
+ *
+ * localStorage rather than sessionStorage, and deliberately so: unlike the credential
+ * this is not a secret, and the same person at the same console should not have to
+ * retype their name every tab. It is also NOT identity — see `label` below.
+ */
+const LABEL_KEY = 'cpe310.operatorLabel';
+
 interface SessionState {
   credential: string;
+  /**
+   * Self-asserted display name. The hub records it verbatim and marks it unverified,
+   * because with shared per-role credentials there is nothing to check it against —
+   * anyone holding the operator key can type any name, including someone else's.
+   *
+   * It is worth having anyway: "Ada disarmed at 07:12" is a more useful line than
+   * "an operator disarmed at 07:12", as long as nobody mistakes it for proof.
+   */
+  label: string;
   /**
    * Bumped on every sign-in and sign-out, and mixed into every query key.
    *
@@ -31,23 +50,27 @@ interface SessionState {
    */
   sessionId: number;
   connection: ConnectionState;
-  signIn: (credential: string) => void;
+  signIn: (credential: string, label?: string) => void;
   signOut: () => void;
   setConnection: (connection: ConnectionState) => void;
 }
 
 export const useSessionStore = create<SessionState>((set) => ({
   credential: sessionStorage.getItem(STORAGE_KEY) ?? '',
+  label: localStorage.getItem(LABEL_KEY) ?? '',
   sessionId: 1,
   connection: 'idle',
 
-  signIn: (credential) => {
+  signIn: (credential, label = '') => {
     sessionStorage.setItem(STORAGE_KEY, credential);
-    set((state) => ({ credential, sessionId: state.sessionId + 1 }));
+    if (label) localStorage.setItem(LABEL_KEY, label);
+    set((state) => ({ credential, label, sessionId: state.sessionId + 1 }));
   },
 
   signOut: () => {
     sessionStorage.removeItem(STORAGE_KEY);
+    // The name survives sign-out on purpose: it is not a secret, and the next shift at
+    // this console overwrites it at sign-in anyway.
     set((state) => ({ credential: '', connection: 'idle', sessionId: state.sessionId + 1 }));
   },
 
@@ -65,4 +88,9 @@ export function currentSessionId(): number {
  */
 export function currentCredential(): string {
   return useSessionStore.getState().credential;
+}
+
+/** The claimed operator name, for the audit header. Empty means "do not send one". */
+export function currentLabel(): string {
+  return useSessionStore.getState().label;
 }

@@ -153,4 +153,62 @@ describe('validateEnv', () => {
 
     expect(env.CORS_ORIGIN).toBe('http://a.test, http://b.test');
   });
+
+  describe('retention', () => {
+    it('keeps everything forever by default', () => {
+      // The upgrade-safety property: adding retention to an existing install must not
+      // silently begin deleting evidence nobody asked it to delete.
+      const env = validateEnv({ ...VALID });
+
+      expect(env.RETENTION_EVENT_DAYS).toBe(0);
+      expect(env.RETENTION_ALERT_DAYS).toBe(0);
+      expect(env.RETENTION_NOTIFICATION_DAYS).toBe(0);
+    });
+
+    it('refuses to prune delivery records before the alerts they explain', () => {
+      // Otherwise an alert survives that nobody can answer "was anyone told?" for —
+      // an audit trail that looks complete and is not.
+      expect(() =>
+        validateEnv({ ...VALID, RETENTION_ALERT_DAYS: '90', RETENTION_NOTIFICATION_DAYS: '30' }),
+      ).toThrow(/RETENTION_NOTIFICATION_DAYS/);
+    });
+
+    it('treats 0 on notifications as forever rather than as zero days', () => {
+      const env = validateEnv({
+        ...VALID,
+        RETENTION_ALERT_DAYS: '90',
+        RETENTION_NOTIFICATION_DAYS: '0',
+      });
+
+      expect(env.RETENTION_ALERT_DAYS).toBe(90);
+    });
+
+    it('refuses a forever alert window paired with a finite notification window', () => {
+      expect(() =>
+        validateEnv({ ...VALID, RETENTION_ALERT_DAYS: '0', RETENTION_NOTIFICATION_DAYS: '365' }),
+      ).toThrow(/RETENTION_NOTIFICATION_DAYS/);
+    });
+
+    it('accepts equal windows', () => {
+      const env = validateEnv({
+        ...VALID,
+        RETENTION_ALERT_DAYS: '90',
+        RETENTION_NOTIFICATION_DAYS: '90',
+      });
+
+      expect(env.RETENTION_NOTIFICATION_DAYS).toBe(90);
+    });
+
+    it('bounds the batch size so one statement cannot hold a long lock', () => {
+      expect(() => validateEnv({ ...VALID, RETENTION_BATCH_SIZE: '500000' })).toThrow(
+        /RETENTION_BATCH_SIZE/,
+      );
+    });
+
+    it('coerces the windows from strings, as the environment supplies them', () => {
+      const env = validateEnv({ ...VALID, RETENTION_EVENT_DAYS: '30' });
+
+      expect(env.RETENTION_EVENT_DAYS).toBe(30);
+    });
+  });
 });

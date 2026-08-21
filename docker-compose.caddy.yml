@@ -22,9 +22,14 @@ services:
       context: .
       dockerfile: ./dashboard/Dockerfile
       args:
-        # Empty on purpose: same-origin defaults apply, because Caddy serves the SPA
-        # and proxies /api and /socket.io to the hub itself.
-        VITE_API_BASE: ''
+        # Same origin as the dashboard, and the /api prefix is REQUIRED rather than
+        # optional: Caddy matches `handle_path /api/*` and strips the prefix before
+        # proxying, so it is how a request is routed to the hub at all. Leaving this
+        # empty made the bundle call /auth/me, which Caddy served the SPA for — a 200
+        # of HTML that the dashboard then tried to parse as JSON.
+        VITE_API_BASE: '/api'
+        # Empty IS correct here: socket.io treats an empty origin as "this page", and
+        # Caddy proxies /socket.io/* WITHOUT stripping anything.
         VITE_WS_URL: ''
     image: cpe310-web:latest
     restart: unless-stopped

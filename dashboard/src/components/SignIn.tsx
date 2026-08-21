@@ -1,3 +1,4 @@
+import { MAX_OPERATOR_LABEL_LENGTH } from '@cpe310/contracts';
 import { useState } from 'react';
 
 import { Button, Icon } from './ui';
@@ -32,7 +33,9 @@ function cleanCredential(raw: string): string {
  */
 export function SignIn() {
   const signIn = useSessionStore((s) => s.signIn);
+  const remembered = useSessionStore((s) => s.label);
   const [value, setValue] = useState('');
+  const [label, setLabel] = useState(remembered);
   const [error, setError] = useState<string | null>(null);
   const [checking, setChecking] = useState(false);
 
@@ -43,7 +46,7 @@ export function SignIn() {
 
     // Store first so the request layer picks it up, then roll back on rejection —
     // leaving a known-bad credential in the store would break every later request.
-    signIn(cleanCredential(value));
+    signIn(cleanCredential(value), label.trim());
     try {
       await api.me();
     } catch (err) {
@@ -83,6 +86,28 @@ export function SignIn() {
             placeholder="VIEWER_KEY / OPERATOR_KEY / ADMIN_KEY"
             autoFocus
           />
+        </div>
+
+        <div className="field">
+          <label className="label" htmlFor="operator-label">
+            Your name <span className="label-optional">optional</span>
+          </label>
+          <input
+            id="operator-label"
+            className="input"
+            type="text"
+            maxLength={MAX_OPERATOR_LABEL_LENGTH}
+            value={label}
+            onChange={(e) => setLabel(e.target.value)}
+            placeholder="e.g. A. Rodriguez"
+          />
+          {/* Said plainly, because a name the system cannot check must never be read as
+              one it can. Credentials are shared per role, so this is a shift-log entry,
+              not identity — and the audit view repeats the same caveat. */}
+          <p className="field-hint">
+            Recorded against what you do here. The hub cannot verify it — credentials are
+            shared per role, so this is a claim, not proof.
+          </p>
         </div>
 
         {error && <p className="form-error">{error}</p>}

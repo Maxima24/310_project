@@ -315,3 +315,36 @@ describe('AgentLivenessService re-entrancy', () => {
     expect(prisma.$transaction).toHaveBeenCalledTimes(2);
   });
 });
+
+describe('AgentLivenessService and browser cameras', () => {
+  it('sweeps DEVICES only, by predicate', async () => {
+    // The sweep's premise is that silence from a device means something is wrong with it.
+    // That does not hold for a browser tab: browsers throttle timers in a backgrounded
+    // tab and stop them outright when it is discarded, so a browser camera goes quiet as
+    // a matter of routine. Sweeping it would raise agent_offline and agent_recovered
+    // forever, training operators to ignore the one alert that means tampering.
+    const { service, prisma } = await buildService([]);
+    jest.spyOn(Date, 'now').mockReturnValue(Date.now() + 120_000);
+
+    await service.sweep();
+
+    const sweepCall = prisma.agent.findMany.mock.calls.find(
+      ([args]: [{ where: Record<string, unknown> }]) => args.where.status === AgentStatus.Online,
+    );
+    expect(sweepCall?.[0].where.origin).toBe('device');
+    jest.restoreAllMocks();
+  });
+
+  it('reconciles DEVICES only, so a browser camera is never back-filled an alert', async () => {
+    const { service, prisma } = await buildService([]);
+    jest.spyOn(Date, 'now').mockReturnValue(Date.now() + 120_000);
+
+    await service.sweep();
+
+    const reconcileCall = prisma.agent.findMany.mock.calls.find(
+      ([args]: [{ where: Record<string, unknown> }]) => args.where.status === AgentStatus.Offline,
+    );
+    expect(reconcileCall?.[0].where.origin).toBe('device');
+    jest.restoreAllMocks();
+  });
+});

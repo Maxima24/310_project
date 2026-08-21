@@ -81,6 +81,67 @@ export class PolicyService {
   }
 
   /**
+   * May a SCHEDULE move the system to `target` right now?
+   *
+   * Deliberately a separate method rather than `canSetMode` with a synthetic identity.
+   * A schedule has no role, and the one thing that must never happen is it inheriting
+   * the admin override: that override exists so a named human can take responsibility
+   * for silencing an active incident, and a cron job cannot take responsibility for
+   * anything. So a scheduled disarm obeys the critical-alert rule with no escape hatch.
+   *
+   * Arming is unrestricted, exactly as it is for a human.
+   */
+  async canScheduleSetMode(target: SystemMode): Promise<PolicyDecision> {
+    if (target !== SystemMode.Disarmed) return { allowed: true };
+
+    const open = await this.prisma.alert.count({
+      where: { severity: 'critical', acknowledged: false },
+    });
+
+    if (open === 0) return { allowed: true };
+
+    return {
+      allowed: false,
+      reason:
+        `Scheduled disarm held: ${open} critical alert${open === 1 ? '' : 's'} still ` +
+        'unacknowledged. A schedule may not be what silences an active incident.',
+      requiresRole: AuthRole.Admin,
+    };
+  }
+
+  /**
+   * May this identity create or edit a schedule that performs `mode`?
+   *
+   * A schedule is a delegated action. Letting someone who cannot disarm create a
+   * schedule that disarms every morning would make schedules a way to do indirectly
+   * what you may not do directly, on a timer — so the caller must hold the same
+   * permission the schedule will exercise.
+   */
+  canManageSchedule(identity: Identity, mode: SystemMode): PolicyDecision {
+    if (!identity.permissions.includes(Permission.SchedulesWrite)) {
+      return {
+        allowed: false,
+        reason: 'This credential cannot manage schedules.',
+        requiresRole: AuthRole.Operator,
+      };
+    }
+
+    const needed = mode === SystemMode.Disarmed ? Permission.SystemDisarm : Permission.SystemArm;
+
+    if (!identity.permissions.includes(needed)) {
+      return {
+        allowed: false,
+        reason:
+          `A schedule that sets "${mode}" requires ${needed}, which this credential ` +
+          'does not have. A schedule cannot grant a permission its author lacks.',
+        requiresRole: AuthRole.Operator,
+      };
+    }
+
+    return { allowed: true };
+  }
+
+  /**
    * May this identity see or act on a resource belonging to `location`?
    *
    * Zone scoping is what makes two viewers with identical roles see different data.

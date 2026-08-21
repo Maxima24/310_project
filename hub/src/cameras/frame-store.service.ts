@@ -1,3 +1,4 @@
+import { FRAME_TTL_MS, MAX_FRAME_BYTES } from '@cpe310/contracts';
 import { Injectable, Logger } from '@nestjs/common';
 import { randomBytes } from 'node:crypto';
 import { EventEmitter } from 'node:events';
@@ -16,14 +17,18 @@ interface StoredFrame {
  * A frame is stale after this. A camera that stopped should read as "no picture"
  * rather than showing a still from ten minutes ago, which is the worst possible
  * failure for a security display — it looks live.
+ *
+ * Both this and MAX_FRAME_BYTES now come from contracts, so a publisher can respect the
+ * same limits the hub enforces. The dashboard in particular has to reason about the TTL
+ * against its own poll interval: the two being equal is why a naive client blanked live
+ * tiles for a whole cycle.
+ *
+ * Re-exported so the existing importers here keep working unchanged.
  */
-const FRAME_TTL_MS = 10_000;
+export { FRAME_TTL_MS, MAX_FRAME_BYTES };
 
 /** Tickets are exchanged immediately; seconds is plenty and limits the replay window. */
 const TICKET_TTL_MS = 30_000;
-
-/** Rejected above this. A 1080p JPEG is well under 1MB; more suggests a wrong content type. */
-export const MAX_FRAME_BYTES = 2 * 1024 * 1024;
 
 /**
  * Concurrent viewers per camera. Each one holds a response open for as long as it

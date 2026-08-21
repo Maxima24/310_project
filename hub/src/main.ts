@@ -39,6 +39,19 @@ async function bootstrap(): Promise<void> {
     }),
   );
 
+  // Single-origin deployments (Caddy, and the Vite dev proxy) never need this — the
+  // browser only ever talks to its own origin. A SPLIT-origin deployment does, and
+  // without it `corsOrigin` was configured, validated, documented, and then ignored.
+  //
+  // Worth knowing how that failure presents: an `<img>` renders a cross-origin MJPEG
+  // stream perfectly well without CORS, so the picture is not what breaks. What breaks
+  // is the ticket POST that precedes it, which reads like an authentication bug and
+  // sends you looking in entirely the wrong place.
+  app.enableCors({
+    origin: config.get<string | string[]>('corsOrigin') ?? '*',
+    credentials: false,
+  });
+
   // Lets Nest run onModuleDestroy, which closes the Prisma pool on SIGTERM —
   // without it `docker compose down` leaks connections until the container is killed.
   app.enableShutdownHooks();

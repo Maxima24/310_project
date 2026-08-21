@@ -1,4 +1,4 @@
-import { AgentStatus, AlertType, type AgentType } from '@cpe310/contracts';
+import { AgentOrigin, AgentStatus, AlertType, type AgentType } from '@cpe310/contracts';
 import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { SchedulerRegistry } from '@nestjs/schedule';
@@ -114,6 +114,8 @@ export class AgentLivenessService implements OnModuleInit {
       const offline = await this.prisma.agent.findMany({
         where: {
           status: AgentStatus.Offline,
+          // Devices only — see the note on the sweep predicate below.
+          origin: AgentOrigin.Device,
           // No unacknowledged offline alert on record for this agent.
           alerts: {
             none: { type: AlertType.AgentOffline, acknowledged: false },
@@ -183,7 +185,19 @@ export class AgentLivenessService implements OnModuleInit {
       try {
         stale = await this.prisma.$transaction(async (tx) => {
           const rows = await tx.agent.findMany({
-            where: { status: AgentStatus.Online, lastSeenAt: { lt: cutoff } },
+            where: {
+              status: AgentStatus.Online,
+              lastSeenAt: { lt: cutoff },
+              // DEVICES ONLY. The sweep's whole premise is that silence from a device
+              // implies something is wrong with it — unplugged, tampered with, crashed.
+              // That premise does not hold for a browser tab: browsers throttle timers
+              // in a backgrounded tab and stop them outright when it is discarded, so a
+              // browser camera goes quiet as a matter of routine. Sweeping it would
+              // raise agent_offline and agent_recovered forever, training operators to
+              // ignore the one alert that means tampering. Its `streaming: false` in
+              // GET /cameras is the correct and sufficient signal.
+              origin: AgentOrigin.Device,
+            },
             select: { id: true, type: true, location: true, lastSeenAt: true },
           });
 

@@ -25,6 +25,17 @@ enum AgentStatus {
   offline
 }
 
+/// Where an agent's data physically comes from.
+///
+/// A hub-set column rather than a value in `capabilities`, because that array is free text
+/// the agent sends about itself and a security-relevant marker cannot be self-reported.
+/// Orthogonal to `type`: a browser is a different SOURCE for a camera, not a new kind of
+/// sensor, and folding it into `type` would break every `type = 'camera'` filter.
+enum AgentOrigin {
+  device
+  browser
+}
+
 enum SystemMode {
   disarmed
   home
@@ -68,6 +79,12 @@ model Agent {
   /// rotated, never recovered. Unique because it is the lookup key on every request.
   tokenHash      String?   @unique
   tokenIssuedAt  DateTime?
+  /// Null means the token never expires, which is right for a dedicated device that
+  /// should keep working unattended. Browser cameras get a short one: a publishing
+  /// credential that outlives the person who created it is a camera nobody chose to run.
+  tokenExpiresAt DateTime?
+  /// Hub-set. Defaults to `device`, so every pre-existing row is correct with no backfill.
+  origin         AgentOrigin @default(device)
   /// Count of re-enrollments. Legitimate when an agent loses its token file, but
   /// also exactly what someone holding the bootstrap key would cause, so it is
   /// recorded rather than silently overwritten.
@@ -133,9 +150,7 @@ model Event {
   occurredAt DateTime
   /// Hub-side clock. Authoritative for ordering, immune to agent clock skew.
   createdAt  DateTime @default(now())
-
   alerts Alert[]
-
   @@index([createdAt(sort: Desc)])
   @@index([agentId, createdAt(sort: Desc)])
   @@index([type, createdAt(sort: Desc)])
@@ -165,6 +180,131 @@ model Alert {
   @@index([acknowledged, createdAt(sort: Desc)])
   /// Serves the dedup lookup: same (type, agent), still unacknowledged, within the cooldown.
   @@index([type, agentId, acknowledged, createdAt(sort: Desc)])
+}
+
+/// Hourly counts, written before raw events are pruned.
+///
+/// Solves the real problem behind "can we compress history": raw events are ~460 bytes
+/// each including indexes, and this system writes thousands a day forever. Rolling an
+/// hour of one agent's one event type into a single counted row is roughly a 16x
+/// reduction on observed data, and unlike an embedding it is exact for the question it
+/// answers — "how much activity, where, when" — which is what every historical view
+/// actually asks. It is deliberately NOT a lossy approximation of individual events:
+/// those either exist in full or have been deleted, with nothing in between pretending
+/// otherwise.
+///
+/// Kept forever by default. At 3 agents and 4 event types this is at most ~288 rows a
+/// day even if every combination fires every hour.
+model EventRollup {
+  id      String    @id @default(uuid())
+  /// Start of the hour, UTC, truncated. The bucket key.
+  hour    DateTime
+  agentId String
+  type    EventType
+  count   Int
+
+  /// One row per bucket, which is what makes the rollup writer idempotent — a retry or
+  /// an overlapping sweep increments rather than duplicating.
+  @@unique([hour, agentId, type])
+  @@index([hour(sort: Desc)])
+}
+
+/// A scheduled arm or disarm.
+///
+/// Fires ONCE at its boundary and then leaves the system alone — see the contract for
+/// why a continuously enforced state would be the wrong model here.
+model ArmSchedule {
+  id      String     @id @default(uuid())
+  name    String
+  enabled Boolean    @default(true)
+  mode    SystemMode
+
+  /// 0 = Sunday. Empty means every day.
+  daysOfWeek Int[] @default([])
+  /// Minutes from local midnight, 0-1439. An integer rather than "HH:MM" so the
+  /// database cannot hold a value the evaluator fails to parse at 03:00.
+  startMinute Int
+  /// IANA zone. Stored per schedule rather than inferred: the hub container runs UTC,
+  /// and a fixed offset would be an hour wrong for half the year.
+  timezone String
+
+  /// Local date (YYYY-MM-DD) this last fired for, and when.
+  ///
+  /// This is the idempotency key, and it is keyed on LOCAL date rather than a UTC
+  /// instant so that "today's 07:00 arm" means the same thing across a DST boundary.
+  /// A conditional update on this column is what stops an overlapping tick, a hub
+  /// restart, or a second instance firing the same schedule twice.
+  lastFiredFor String?
+  lastFiredAt  DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  /// The evaluator scans enabled schedules on every tick.
+  @@index([enabled])
+}
+
+enum AuditActor {
+  bootstrap
+  agent
+  viewer
+  operator
+  admin
+  /// The hub acting on its own — a scheduled transition has no operator behind it.
+  system
+}
+
+enum AuditAction {
+  mode_changed
+  alert_acknowledged
+  agent_enrolled
+  agent_token_rotated
+  camera_viewed
+  schedule_fired
+  browser_camera_provisioned
+  browser_camera_revoked
+}
+
+enum AuditOutcome {
+  allowed
+  denied
+}
+
+/// Who did what, and whether it was allowed.
+///
+/// Deliberately holds NO credential material, not even a hash. Agent tokens are
+/// 256-bit random values and their hashes are safe at rest, but the human credentials
+/// are operator-chosen strings with an 8-character floor — hashing one into this table
+/// would put a crackable copy of a secret into the database for the first time, and
+/// the only thing it would buy is telling two holders of the SAME key apart, which it
+/// cannot do anyway. What the hub genuinely knows is the role, and for agent tokens
+/// the agent. That is what is stored.
+model AuditLog {
+  id      String       @id @default(uuid())
+  at      DateTime     @default(now())
+  action  AuditAction
+  outcome AuditOutcome
+
+  /// VERIFIED: established from the credential presented.
+  actor        AuditActor
+  /// VERIFIED: set only for agent tokens, which are issued per agent.
+  actorAgentId String?
+  /// UNVERIFIED: a self-asserted display name from the X-Operator-Label header.
+  /// Anyone holding the credential can send any name. Never treat as identity.
+  actorLabel   String?
+
+  /// Why a denial happened, in the same words the caller was given.
+  reason     String?
+  targetType String?
+  targetId   String?
+  detail     Json    @default("{}")
+  /// The proxy's address rather than the client's unless the hub trusts its proxy.
+  ip         String?
+
+  @@index([at(sort: Desc)])
+  @@index([action, at(sort: Desc)])
+  /// Serves the query that matters most: "what was refused, most recent first".
+  @@index([outcome, at(sort: Desc)])
 }
 
 /// Singleton row (id is always 1). A typed enum column beats a generic

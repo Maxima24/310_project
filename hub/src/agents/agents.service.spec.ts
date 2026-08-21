@@ -176,3 +176,24 @@ describe('AgentsService.findAll', () => {
     });
   });
 });
+
+describe('AgentsService and the reserved browser namespace', () => {
+  it('refuses to enroll an id in the browser-camera namespace', async () => {
+    // Without this, a holder of the bootstrap key could enroll `browser-abc123` from the
+    // device path and produce a feed the UI labels browser-origin while it is nothing of
+    // the kind — or collide with a live session and rotate its token out from under it.
+    const { service } = await buildService();
+
+    await expect(
+      service.register({ id: 'browser-abc123', type: 'camera', location: 'Lobby' }),
+    ).rejects.toThrow(/reserved/i);
+  });
+
+  it('still allows an ordinary id that merely contains the word', async () => {
+    const { service } = await buildService();
+
+    await expect(
+      service.register({ id: 'lobby-browser-cam', type: 'camera', location: 'Lobby' }),
+    ).resolves.toBeTruthy();
+  });
+});

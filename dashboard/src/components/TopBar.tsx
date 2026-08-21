@@ -1,5 +1,8 @@
-import { Icon, IconButton, type IconName } from './ui';
+import { NavLink } from 'react-router-dom';
+
+import { Icon, IconButton } from './ui';
 import { usePermissions } from '../lib/permissions';
+import { ROUTES, mayAccess } from '../routes';
 import { useSessionStore } from '../stores/session.store';
 
 /**
@@ -7,15 +10,12 @@ import { useSessionStore } from '../stores/session.store';
  *
  * The nav is a single pill group with the active item expanded to show its label —
  * icons alone are ambiguous, labels alone are wide, and this gets both without a
- * tooltip. Sections beyond the overview are not built yet, so they are rendered
- * disabled rather than as links that go nowhere.
+ * tooltip.
+ *
+ * Items are filtered by permission rather than disabled, because unlike the earlier
+ * "not built yet" state these are real pages that some credentials genuinely may not
+ * open. A visible-but-dead control invites the operator to keep trying it.
  */
-const NAV: Array<{ id: string; icon: IconName; label: string; ready: boolean }> = [
-  { id: 'overview', icon: 'home', label: 'Overview', ready: true },
-  { id: 'cameras', icon: 'camera', label: 'Cameras', ready: false },
-  { id: 'events', icon: 'chart', label: 'Reports', ready: false },
-  { id: 'settings', icon: 'settings', label: 'Settings', ready: false },
-];
 
 /**
  * Live is the expected state, so it stays neutral — a green badge that is green 99%
@@ -40,9 +40,11 @@ const CONNECTION_LABEL: Record<string, string> = {
 export function TopBar({ onRefresh }: { onRefresh: () => void }) {
   const connection = useSessionStore((s) => s.connection);
   const signOut = useSessionStore((s) => s.signOut);
-  const { role } = usePermissions();
+  const label = useSessionStore((s) => s.label);
+  const { role, identity } = usePermissions();
 
   const tone = CONNECTION_TONE[connection] ?? 'idle';
+  const nav = ROUTES.filter((route) => mayAccess(route, identity.permissions));
 
   return (
     <header className="topbar">
@@ -54,17 +56,22 @@ export function TopBar({ onRefresh }: { onRefresh: () => void }) {
       </div>
 
       <nav className="nav" aria-label="Sections">
-        {NAV.map((item) => (
-          <button
-            key={item.id}
-            className="nav-item"
-            aria-current={item.id === 'overview' ? 'page' : undefined}
-            disabled={!item.ready}
-            title={item.ready ? item.label : `${item.label} — not built yet`}
+        {nav.map((route) => (
+          <NavLink
+            key={route.path}
+            to={route.path}
+            end={route.path === '/'}
+            className={({ isActive }) => `nav-item ${isActive ? 'is-active' : ''}`}
+            title={route.label}
           >
-            <Icon name={item.icon} size={16} />
-            {item.id === 'overview' && <span className="nav-label">{item.label}</span>}
-          </button>
+            {({ isActive }) => (
+              <>
+                <Icon name={route.icon} size={16} />
+                {/* Only the current section spends the horizontal space on a label. */}
+                {isActive && <span className="nav-label">{route.label}</span>}
+              </>
+            )}
+          </NavLink>
         ))}
       </nav>
 
@@ -84,9 +91,11 @@ export function TopBar({ onRefresh }: { onRefresh: () => void }) {
         <IconButton icon="refresh" label="Refresh data" onClick={onRefresh} />
 
         <button className="user" onClick={signOut} title="Sign out">
-          <span className="avatar">{role.slice(0, 2).toUpperCase()}</span>
+          <span className="avatar">{(label || role).slice(0, 2).toUpperCase()}</span>
           <span className="user-text">
-            <span className="user-name">Signed in</span>
+            {/* The name is what the operator typed, so it is shown as their label but
+                the role underneath is the part the hub actually verified. */}
+            <span className="user-name">{label || 'Signed in'}</span>
             <span className="user-role">{role}</span>
           </span>
           <Icon name="logout" size={15} />

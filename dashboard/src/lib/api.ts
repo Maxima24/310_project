@@ -1,18 +1,27 @@
 import type {
   AgentView,
   AlertView,
+  ArmScheduleView,
+  AuditEntryView,
   AuthRole,
+  BrowserCameraSessionResponse,
   CameraStatusView,
+  CreateBrowserCameraRequest,
   EventView,
   IdentityResponse,
   NotificationView,
+  QueryAuditRequest,
+  ReportsSummary,
   StreamTicketResponse,
   SystemMode,
   SystemModeChangeResponse,
   SystemModeResponse,
+  UpsertArmScheduleRequest,
 } from '@cpe310/contracts';
 
-import { currentCredential } from '../stores/session.store';
+import { OPERATOR_LABEL_HEADER } from '@cpe310/contracts';
+
+import { currentCredential, currentLabel } from '../stores/session.store';
 import { API_BASE } from './config';
 
 /**
@@ -56,6 +65,26 @@ export class ApiError extends Error {
  */
 const REQUEST_TIMEOUT_MS = 10_000;
 
+/**
+ * The claimed operator name, if one was entered and it can legally travel in a header.
+ *
+ * Control characters are dropped here as well as on the hub: `fetch` throws outright on
+ * a header containing a newline, which would turn a stray paste into an unexplained
+ * failure of every request rather than a slightly odd name in the audit trail.
+ */
+function labelHeader(): Record<string, string> {
+  const label = currentLabel()
+    .split('')
+    .filter((ch) => {
+      const code = ch.charCodeAt(0);
+      return code >= 0x20 && code !== 0x7f;
+    })
+    .join('')
+    .trim();
+
+  return label ? { [OPERATOR_LABEL_HEADER]: label } : {};
+}
+
 async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   let response: Response;
 
@@ -66,6 +95,7 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
       headers: {
         'Content-Type': 'application/json',
         Authorization: `Bearer ${currentCredential()}`,
+        ...labelHeader(),
         ...init.headers,
       },
     });
@@ -144,6 +174,93 @@ export const api = {
   acknowledge: (id: string) => request<AlertView>(`/alerts/${id}/ack`, { method: 'POST' }),
 
   cameras: () => request<CameraStatusView[]>('/cameras'),
+
+  /** Admin-only. Returns the publishing token exactly once. */
+  createBrowserCamera: (input: CreateBrowserCameraRequest) =>
+    request<BrowserCameraSessionResponse>('/cameras/browser-sessions', {
+      method: 'POST',
+      body: JSON.stringify(input),
+    }),
+
+  renewBrowserCamera: (agentId: string) =>
+    request<BrowserCameraSessionResponse>(`/cameras/browser-sessions/${agentId}/renew`, {
+      method: 'POST',
+    }),
+
+  revokeBrowserCamera: (agentId: string) =>
+    request<void>(`/cameras/browser-sessions/${agentId}`, { method: 'DELETE' }),
+
+  /**
+   * Publishes one frame as a camera.
+   *
+   * Deliberately NOT routed through `request()`. That helper injects
+   * `Authorization: Bearer ${currentCredential()}` and a JSON content type — both wrong
+   * here, and the first is actively dangerous: sending the operator credential to a
+   * publish endpoint would be handing a human credential to a route meant only for
+   * scoped agent tokens. Taking the token as an explicit parameter makes that mistake
+   * structurally impossible rather than merely unlikely.
+   *
+   * The Blob goes in as the body so fetch sets `Content-Type: image/jpeg` from
+   * `blob.type`, which is what the hub's raw body parser matches on.
+   */
+  publishFrame: async (agentId: string, blob: Blob, token: string): Promise<void> => {
+    const response = await fetch(`${API_BASE}/cameras/${agentId}/frame`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}` },
+      body: blob,
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+    });
+
+    if (!response.ok) throw await toApiError(response);
+  },
+
+  /**
+   * Best-effort revoke on tab close.
+   *
+   * `keepalive` lets the request outlive the page. Not `navigator.sendBeacon`, which
+   * cannot set an Authorization header. A missed revoke is bounded rather than
+   * permanent — the token expires on its own within the session TTL.
+   */
+  revokeBrowserCameraOnExit: (agentId: string): void => {
+    void fetch(`${API_BASE}/cameras/browser-sessions/${agentId}`, {
+      method: 'DELETE',
+      headers: { Authorization: `Bearer ${currentCredential()}` },
+      keepalive: true,
+    }).catch(() => {
+      // Nothing useful to do from a page that is going away.
+    });
+  },
+
+  schedules: () => request<ArmScheduleView[]>('/schedules'),
+
+  createSchedule: (input: UpsertArmScheduleRequest) =>
+    request<ArmScheduleView>('/schedules', { method: 'POST', body: JSON.stringify(input) }),
+
+  updateSchedule: (id: string, input: UpsertArmScheduleRequest) =>
+    request<ArmScheduleView>(`/schedules/${id}`, { method: 'PUT', body: JSON.stringify(input) }),
+
+  deleteSchedule: (id: string) => request<void>(`/schedules/${id}`, { method: 'DELETE' }),
+
+  /** Admin-only. */
+  audit: (query: QueryAuditRequest = {}) => {
+    const params = new URLSearchParams();
+    for (const [key, value] of Object.entries(query)) {
+      if (value !== undefined && value !== '') params.set(key, String(value));
+    }
+    const suffix = params.toString();
+    return request<AuditEntryView[]>(`/audit${suffix ? `?${suffix}` : ''}`);
+  },
+
+  /**
+   * Aggregated history. The browser's own zone is sent so day boundaries fall where the
+   * operator expects rather than wherever the hub container happens to be.
+   */
+  reports: (days: number) =>
+    request<ReportsSummary>(
+      `/reports/summary?days=${days}&tz=${encodeURIComponent(
+        Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC',
+      )}`,
+    ),
 
   /**
    * Exchanges the operator credential for a single-use stream ticket. Needed because

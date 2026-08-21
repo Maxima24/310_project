@@ -1,4 +1,4 @@
-import { AgentType } from '@cpe310/contracts';
+import { AGENT_ID_MAX_LENGTH, AGENT_ID_PATTERN, AgentType } from '@cpe310/contracts';
 import {
   ArrayMaxSize,
   IsArray,
@@ -14,11 +14,14 @@ export class RegisterAgentDto {
   /**
    * Operator-chosen and used as the primary key, so it is constrained to
    * URL-safe characters — it appears in `/agents/:id/heartbeat`.
+   *
+   * The pattern comes from contracts so the dashboard's "add a camera" form rejects the
+   * same ids this does, rather than accepting one the hub then refuses.
    */
   @IsString()
   @MinLength(1)
-  @MaxLength(64)
-  @Matches(/^[a-zA-Z0-9._-]+$/, {
+  @MaxLength(AGENT_ID_MAX_LENGTH)
+  @Matches(AGENT_ID_PATTERN, {
     message: 'id may contain only letters, numbers, dot, underscore and hyphen',
   })
   id: string;
